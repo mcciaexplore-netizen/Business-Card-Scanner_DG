@@ -4,7 +4,7 @@ import { useState, useCallback, useEffect } from "react";
 import { Dropzone } from "./Dropzone";
 import { StatsRow } from "./StatsRow";
 import { BulkResultsList } from "./BulkResultsList";
-import { CheckIcon, AlertIcon, GridIcon } from "./icons";
+import { CheckIcon, AlertIcon, GridIcon, ArrowLeftIcon } from "./icons";
 import type { BulkScanResult } from "@/lib/types";
 
 export function BulkScanPanel() {
@@ -32,6 +32,17 @@ export function BulkScanPanel() {
     setStatus({ text: "", kind: "" });
     setResult(null);
   }, []);
+
+  /** Back from the result screen to the empty upload screen. */
+  const handleBackFromResult = () => {
+    setFile(null);
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setResult(null);
+    setStatus({ text: "", kind: "" });
+  };
 
   const handleScan = async () => {
     if (!file) return;
@@ -110,6 +121,16 @@ export function BulkScanPanel() {
               {result.saved > 0 ? <CheckIcon /> : <AlertIcon />}
             </div>
             <h2>Scan Result</h2>
+            <button
+              id="btn-back-from-bulk-result"
+              className="btn btn-ghost btn-retake"
+              onClick={handleBackFromResult}
+              type="button"
+              style={{ marginLeft: "auto" }}
+            >
+              <ArrowLeftIcon />
+              Back
+            </button>
           </div>
           <StatsRow detected={result.detected} saved={result.saved} failed={result.failed} />
           {result.cards.length > 0 && <BulkResultsList cards={result.cards} />}

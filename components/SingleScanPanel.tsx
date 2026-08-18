@@ -5,7 +5,7 @@ import { Dropzone } from "./Dropzone";
 import { CameraCapture } from "./CameraCapture";
 import { StatsRow } from "./StatsRow";
 import { FieldList } from "./FieldList";
-import { CheckIcon, AlertIcon, ImageIcon, CameraIcon } from "./icons";
+import { CheckIcon, AlertIcon, ImageIcon, CameraIcon, ArrowLeftIcon } from "./icons";
 import type { SingleScanResult } from "@/lib/types";
 
 type Source = "upload" | "camera";
@@ -60,6 +60,14 @@ export function SingleScanPanel() {
       setBackPreview((prev) => { if (prev) URL.revokeObjectURL(prev); return makePreview(f); });
     }
   }, [step]);
+
+  /** Back from the result screen to the last capture step, keeping the
+   *  already-captured images so the user doesn't have to redo them. */
+  const handleBackFromDone = () => {
+    setStep(isTwoSided ? "back" : "front");
+    setResult(null);
+    setStatus({ text: "", kind: "" });
+  };
 
   // ── Reset entire flow ─────────────────────────────────────────────────────
   const resetAll = () => {
@@ -279,17 +287,29 @@ export function SingleScanPanel() {
           </div>
         )}
 
-        {/* ── Scan-another button after done ─────────────────────────── */}
+        {/* ── Back / scan-another buttons after done ───────────────────── */}
         {step === "done" && (
-          <button
-            id="btn-scan-another"
-            className="btn btn-ghost btn-scan-another"
-            onClick={resetAll}
-            type="button"
-          >
-            <RefreshIcon />
-            Scan Another Card
-          </button>
+          <div className="two-sided-actions">
+            <button
+              id="btn-back-from-done"
+              className="btn btn-ghost btn-retake"
+              onClick={handleBackFromDone}
+              type="button"
+            >
+              <ArrowLeftIcon />
+              Back
+            </button>
+
+            <button
+              id="btn-scan-another"
+              className="btn btn-ghost btn-scan-another"
+              onClick={resetAll}
+              type="button"
+            >
+              <RefreshIcon />
+              Scan Another Card
+            </button>
+          </div>
         )}
 
         <p className={"status-line" + (status.kind ? ` ${status.kind}` : "")}>{status.text}</p>
@@ -346,15 +366,6 @@ function ArrowRightIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <line x1="5" y1="12" x2="19" y2="12" />
       <polyline points="12 5 19 12 12 19" />
-    </svg>
-  );
-}
-
-function ArrowLeftIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <line x1="19" y1="12" x2="5" y2="12" />
-      <polyline points="12 19 5 12 12 5" />
     </svg>
   );
 }
