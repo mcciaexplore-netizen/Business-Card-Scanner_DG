@@ -153,8 +153,7 @@ export function SingleScanPanel() {
     }
   };
 
-  // ── Current file & preview for the active step ────────────────────────────
-  const activeFile    = step === "back" ? backFile    : frontFile;
+  // ── Current preview for the active step ───────────────────────────────────
   const activePreview = step === "back" ? backPreview : (source === "upload" ? frontPreview : null);
 
   // ── Render ────────────────────────────────────────────────────────────────

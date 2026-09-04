@@ -1,14 +1,24 @@
 import { DetectedBox } from "../detectCards";
 import { OcrResult } from "../ocr";
 
-const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || "http://127.0.0.1:8000";
+// RapidOCR is opt-in. An unset URL means the deployment intentionally uses
+// Gemini fallbacks without making a pointless localhost request on Vercel.
+const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL?.trim().replace(/\/+$/, "");
+
+function requireOcrServiceUrl(): string {
+  if (!OCR_SERVICE_URL) {
+    throw new Error("OCR_SERVICE_URL is not configured.");
+  }
+  return OCR_SERVICE_URL;
+}
 
 /** Checks if the OpenCV + RapidOCR service is healthy and running. */
 export async function isOcrServiceAvailable(): Promise<boolean> {
+  if (!OCR_SERVICE_URL) return false;
   try {
     const res = await fetch(`${OCR_SERVICE_URL}/health`, {
       method: "GET",
-      signal: AbortSignal.timeout(300),
+      signal: AbortSignal.timeout(2000),
     });
     return res.ok;
   } catch {
@@ -16,16 +26,17 @@ export async function isOcrServiceAvailable(): Promise<boolean> {
   }
 }
 
-/** Sends card crop to OpenCV + RapidOCR service for deskewing and OCR text recognition. */
+/** Sends a card crop to the sidecar for OpenCV deskewing and RapidOCR. */
 export async function runRapidOcr(imageBytes: Buffer): Promise<OcrResult> {
+  const serviceUrl = requireOcrServiceUrl();
   const formData = new FormData();
   const blob = new Blob([new Uint8Array(imageBytes)], { type: "image/jpeg" });
   formData.append("file", blob, "card.jpg");
 
-  const res = await fetch(`${OCR_SERVICE_URL}/ocr-extract`, {
+  const res = await fetch(`${serviceUrl}/ocr-extract`, {
     method: "POST",
     body: formData,
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!res.ok) {
@@ -39,7 +50,7 @@ export async function runRapidOcr(imageBytes: Buffer): Promise<OcrResult> {
   };
 }
 
-/** Uses OpenCV contour detection microservice to detect card bounding boxes in a bulk photo. */
+/** Uses the OpenCV sidecar to detect card bounding boxes in a bulk photo. */
 export async function detectOpenCvBoxes(imageBytes: Buffer): Promise<DetectedBox[]> {
   const serviceUp = await isOcrServiceAvailable();
   if (!serviceUp) return [];
@@ -49,10 +60,10 @@ export async function detectOpenCvBoxes(imageBytes: Buffer): Promise<DetectedBox
     const blob = new Blob([new Uint8Array(imageBytes)], { type: "image/jpeg" });
     formData.append("file", blob, "bulk.jpg");
 
-    const res = await fetch(`${OCR_SERVICE_URL}/detect-boxes`, {
+    const res = await fetch(`${requireOcrServiceUrl()}/detect-boxes`, {
       method: "POST",
       body: formData,
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(5000),
     });
 
     if (!res.ok) return [];

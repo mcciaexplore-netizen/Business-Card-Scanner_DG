@@ -1,9 +1,14 @@
 import { runOcr, runOcrRich } from "../ocr";
 import { parseCardText } from "../parseCardText";
-import { isOcrServiceAvailable, runRapidOcr } from "./paddleOcrClient";
+import { isOcrServiceAvailable, runRapidOcr } from "./rapidOcrClient";
 import { extractCardFieldsLocalNlp } from "./localNlpExtractor";
 import { extractFieldsFromOcrText } from "./textGemini";
 import { CardFields } from "../types";
+import {
+  OcrCandidate,
+  isOcrCandidateUsable,
+  selectBestOcrCandidate,
+} from "./ocrPolicy";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Validation helpers
@@ -72,11 +77,13 @@ function validateAndSanitiseFields(f: CardFields): CardFields {
   return {
     Name:        isCleanName(f.Name)           ? f.Name        : "",
     Company:     isCleanCompany(f.Company)     ? f.Company     : "",
+    Industry:    f.Industry,
     Designation: isCleanDesignation(f.Designation) ? f.Designation : "",
     Phone:       f.Phone,   // Phone is extracted by strict regex — always trust it
     Email:       f.Email,   // Email is extracted by strict regex — always trust it
     Website:     f.Website, // Website is extracted by strict regex — always trust it
     Address:     isCleanAddress(f.Address)     ? f.Address     : "",
+    "Extraction Engine": f["Extraction Engine"],
   };
 }
 
@@ -99,11 +106,13 @@ function smartMerge(t1: CardFields, t2: CardFields): CardFields {
   return {
     Name:        pick(t2.Name, t1.Name),
     Company:     pick(t2.Company, t1.Company),
+    Industry:    pick(t2.Industry, t1.Industry),
     Designation: pick(t2.Designation, t1.Designation),
     Phone:       pick(t2.Phone, t1.Phone),
     Email:       pick(t2.Email, t1.Email),
     Website:     pick(t2.Website, t1.Website),
     Address:     pick(t2.Address, t1.Address),
+    "Extraction Engine": pick(t2["Extraction Engine"], t1["Extraction Engine"]),
   };
 }
 
@@ -123,132 +132,166 @@ function isExtractionSuccessful(f: CardFields): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 100% Zero-Cost Hybrid 3-Tier Business Card Extraction Architecture:
- * - Tier 1: Local OCR + Fast Pattern Regex Parser → ₹0.00 Cost (100% Offline)
- * - Tier 2: Local OCR + Advanced Positional NLP Engine → ₹0.00 Cost (100% Offline)
- * - Tier 3: Emergency Cloud Fallback (Text API ~₹0.003, Vision API ~₹0.25)
- *
- * Key improvements:
- * - Rich OCR (bbox + word-level confidence) passed to Tier 2 for spatial analysis
- * - Validation gate rejects garbage fields before declaring success
- * - Smart field-level merge prefers lower-noise result per field
- * - Tighter success criterion: name must pass isCleanName()
+ * Confidence-gated extraction pipeline:
+ * 1. Tesseract (local development) with a 70% confidence requirement.
+ * 2. RapidOCR sidecar when Tesseract is unavailable, below 70%, or incomplete.
+ * 3. Gemini text parsing of the best OCR text.
+ * 4. Gemini Vision fallback in extractCard() when all earlier stages fail.
  */
-export async function smartExtractCard(imageBytes: Buffer): Promise<CardFields | null> {
-  let ocrText = "";
-  let ocrConfidence = 0;
+function parseLocalCandidate(
+  candidate: OcrCandidate,
+  richOcrResult: Awaited<ReturnType<typeof runOcrRich>> | null = null
+): { accepted: CardFields | null; partial: CardFields | null } {
+  if (!isOcrCandidateUsable(candidate)) {
+    console.log(
+      `[smartExtractor] ${candidate.engine} not accepted locally ` +
+      `(confidence=${candidate.confidence.toFixed(1)}, minimum=70, textLength=${candidate.text.trim().length})`
+    );
+    return { accepted: null, partial: null };
+  }
 
-  // ── Step 1: Run local OCR (RapidOCR → Tesseract) ─────────────────────────
+  const { fields: t1Fields, missingRequired } = parseCardText(candidate.text);
+  const t2Fields = extractCardFieldsLocalNlp(richOcrResult ?? candidate.text);
+  const validated = validateAndSanitiseFields(smartMerge(t1Fields, t2Fields));
+
+  if (!missingRequired && isExtractionSuccessful(validateAndSanitiseFields(t1Fields))) {
+    const accepted = validateAndSanitiseFields(t1Fields);
+    console.log(`[smartExtractor] ${candidate.engine} accepted by the fast parser at ${candidate.confidence.toFixed(1)}%`);
+    return { accepted, partial: accepted };
+  }
+
+  if (isExtractionSuccessful(validated)) {
+    console.log(`[smartExtractor] ${candidate.engine} accepted by the positional parser at ${candidate.confidence.toFixed(1)}%`);
+    return { accepted: validated, partial: validated };
+  }
+
+  console.log(`[smartExtractor] ${candidate.engine} passed 70% confidence but did not produce a complete card`);
+  return { accepted: null, partial: validated };
+}
+
+interface SmartExtractionResult {
+  fields: CardFields;
+  engine: string;
+}
+
+export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtractionResult | null> {
+  const candidates: OcrCandidate[] = [];
+  const partialResults: Array<{ fields: CardFields; confidence: number }> = [];
+
+  const rememberPartial = (fields: CardFields | null, confidence: number) => {
+    if (fields) partialResults.push({ fields, confidence });
+  };
+
+  // NEXT_RUNTIME is also set by local Next.js. VERCEL/AWS are the actual
+  // signals used here to avoid starting a Tesseract worker in serverless.
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+  // ── OCR stage 1: Tesseract ────────────────────────────────────────────────
+  if (!isServerless) {
+    let richOcrResult: Awaited<ReturnType<typeof runOcrRich>> | null = null;
+    let tesseractCandidate: OcrCandidate | null = null;
+
+    try {
+      richOcrResult = await runOcrRich(imageBytes);
+      tesseractCandidate = {
+        engine: "tesseract",
+        text: richOcrResult.text,
+        confidence: richOcrResult.confidence,
+      };
+      console.log(
+        `[smartExtractor] Tesseract executed ` +
+        `(confidence=${richOcrResult.confidence.toFixed(1)}, lines=${richOcrResult.lines.length})`
+      );
+    } catch (richError) {
+      console.log(`[smartExtractor] Rich Tesseract failed; trying plain Tesseract: ${richError}`);
+      try {
+        const plainResult = await runOcr(imageBytes);
+        tesseractCandidate = {
+          engine: "tesseract",
+          text: plainResult.text,
+          confidence: plainResult.confidence,
+        };
+        console.log(`[smartExtractor] Plain Tesseract executed (confidence=${plainResult.confidence.toFixed(1)})`);
+      } catch (plainError) {
+        console.log(`[smartExtractor] Tesseract failed: ${plainError}`);
+      }
+    }
+
+    if (tesseractCandidate) {
+      candidates.push(tesseractCandidate);
+      const result = parseLocalCandidate(tesseractCandidate, richOcrResult);
+      if (result.accepted) {
+        return { fields: result.accepted, engine: "Tesseract OCR" };
+      }
+      rememberPartial(result.partial, tesseractCandidate.confidence);
+    }
+  }
+
+  // ── OCR stage 2: RapidOCR sidecar ────────────────────────────────────────
+  // This stage intentionally runs after Tesseract and before either Gemini
+  // fallback. It is tried when Tesseract is unavailable, below 70%, or unable
+  // to produce a complete card.
   const serviceUp = await isOcrServiceAvailable();
   if (serviceUp) {
     try {
-      const res = await runRapidOcr(imageBytes);
-      ocrText = res.text;
-      ocrConfidence = res.confidence;
-      console.log(`[smartExtractor] RapidOCR executed (confidence=${ocrConfidence.toFixed(1)})`);
-    } catch (e) {
-      console.log(`[smartExtractor] RapidOCR failed, trying Tesseract: ${e}`);
+      const rapidResult = await runRapidOcr(imageBytes);
+      const rapidCandidate: OcrCandidate = {
+        engine: "rapidocr",
+        text: rapidResult.text,
+        confidence: rapidResult.confidence,
+      };
+      candidates.push(rapidCandidate);
+      console.log(`[smartExtractor] RapidOCR executed (confidence=${rapidResult.confidence.toFixed(1)})`);
+
+      const result = parseLocalCandidate(rapidCandidate);
+      if (result.accepted) {
+        return { fields: result.accepted, engine: "RapidOCR" };
+      }
+      rememberPartial(result.partial, rapidCandidate.confidence);
+    } catch (error) {
+      console.log(`[smartExtractor] RapidOCR failed: ${error}`);
     }
+  } else {
+    console.log(`[smartExtractor] RapidOCR sidecar unavailable; continuing to Gemini fallback`);
   }
 
-  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NEXT_RUNTIME);
-
-  // Attempt rich Tesseract OCR for bbox-aware Tier 2 (only in local non-serverless mode)
-  let richOcrResult = null;
-  if (!ocrText && !isServerless) {
-    try {
-      richOcrResult = await runOcrRich(imageBytes);
-      ocrText = richOcrResult.text;
-      ocrConfidence = richOcrResult.confidence;
-      console.log(
-        `[smartExtractor] Tesseract Rich OCR executed (confidence=${ocrConfidence.toFixed(1)}, lines=${richOcrResult.lines.length})`
-      );
-    } catch (e) {
-      console.log(`[smartExtractor] Tesseract Rich OCR failed, trying plain OCR: ${e}`);
-    }
-  }
-
-  // Plain Tesseract fallback if rich failed
-  if (!ocrText && !isServerless) {
-    try {
-      const res = await runOcr(imageBytes);
-      ocrText = res.text;
-      ocrConfidence = res.confidence;
-      console.log(`[smartExtractor] Tesseract Plain OCR executed (confidence=${ocrConfidence.toFixed(1)})`);
-    } catch (e) {
-      console.log(`[smartExtractor] Tesseract Plain OCR also failed: ${e}`);
-    }
-  }
-
-  if (!ocrText || ocrText.trim().length < 15) {
-    console.log(`[smartExtractor] OCR text insufficient (<15 chars) — triggering Tier 3 Cloud Fallback`);
+  // ── Cloud stage 3A: Gemini text parser ───────────────────────────────────
+  const bestCandidate = selectBestOcrCandidate(candidates);
+  if (!bestCandidate) {
+    console.log(`[smartExtractor] No OCR engine produced enough text; continuing to Gemini Vision`);
     return null;
   }
 
-  // ── Step 2: Tier 1 — Fast Regex Parser ───────────────────────────────────
-  const { fields: t1Fields, missingRequired: t1Missing } = parseCardText(ocrText);
-  console.log(
-    `[smartExtractor] Tier 1 result — Name: "${t1Fields.Name}", Company: "${t1Fields.Company}", Designation: "${t1Fields.Designation}", Phone: "${t1Fields.Phone}", Email: "${t1Fields.Email}"`
-  );
-
-  if (!t1Missing && isExtractionSuccessful(t1Fields)) {
-    const validated = validateAndSanitiseFields(t1Fields);
-    if (isExtractionSuccessful(validated)) {
-      console.log(
-        `[smartExtractor] ✅ Tier 1 Success (Cost: ₹0.00) — Name: "${validated.Name}", Phone: "${validated.Phone}", Email: "${validated.Email}"`
-      );
-      return validated;
-    }
-  }
-
-  // ── Step 3: Tier 2 — Advanced Positional NLP Engine ──────────────────────
-  console.log(`[smartExtractor] Tier 1 incomplete. Running Tier 2 Positional NLP Engine (Cost: ₹0.00)...`);
-
-  // Pass rich OCR data to Tier 2 if available for positional scoring
-  const t2Fields = extractCardFieldsLocalNlp(richOcrResult ?? ocrText);
-  console.log(
-    `[smartExtractor] Tier 2 result — Name: "${t2Fields.Name}", Company: "${t2Fields.Company}", Designation: "${t2Fields.Designation}", Phone: "${t2Fields.Phone}", Email: "${t2Fields.Email}"`
-  );
-
-  // Smart field-level merge: pick the cleaner value per field
-  const merged = smartMerge(t1Fields, t2Fields);
-  const validated = validateAndSanitiseFields(merged);
-
-  console.log(
-    `[smartExtractor] Merged result — Name: "${validated.Name}", Company: "${validated.Company}", Designation: "${validated.Designation}"`
-  );
-
-  if (isExtractionSuccessful(validated)) {
-    console.log(
-      `[smartExtractor] ✅ Tier 2 Success (Cost: ₹0.00, 100% Offline) — Name: "${validated.Name}"`
-    );
-    return validated;
-  }
-
-  // ── Step 4: Tier 3A — Cloud Gemini Text API (last resort) ─────────────────
   try {
     console.log(
-      `[smartExtractor] ⚡ Tier 3A Triggered: Sending OCR text to Cloud Gemini Text API (Cost: ~₹0.003)...`
+      `[smartExtractor] Sending ${bestCandidate.engine} text to the Gemini text parser`
     );
-    const cloudFields = await extractFieldsFromOcrText(ocrText);
+    const cloudFields = await extractFieldsFromOcrText(bestCandidate.text);
 
     if (cloudFields.Name || cloudFields.Phone || cloudFields.Email) {
+      const localFields = partialResults.sort((a, b) => b.confidence - a.confidence)[0]?.fields;
       const t3Merged: CardFields = {
-        Name:        cloudFields.Name        || validated.Name        || "",
-        Company:     cloudFields.Company     || validated.Company     || "",
-        Designation: cloudFields.Designation || validated.Designation || "",
-        Phone:       cloudFields.Phone       || validated.Phone       || "",
-        Email:       cloudFields.Email       || validated.Email       || "",
-        Website:     cloudFields.Website     || validated.Website     || "",
-        Address:     cloudFields.Address     || validated.Address     || "",
+        Name:        cloudFields.Name        || localFields?.Name        || "",
+        Company:     cloudFields.Company     || localFields?.Company     || "",
+        Industry:    cloudFields.Industry    || localFields?.Industry    || "",
+        Designation: cloudFields.Designation || localFields?.Designation || "",
+        Phone:       cloudFields.Phone       || localFields?.Phone       || "",
+        Email:       cloudFields.Email       || localFields?.Email       || "",
+        Website:     cloudFields.Website     || localFields?.Website     || "",
+        Address:     cloudFields.Address     || localFields?.Address     || "",
+        "Extraction Engine": "",
       };
-      console.log(`[smartExtractor] ✅ Tier 3A Success: Cloud Gemini Text API extracted fields!`);
-      return t3Merged;
+      console.log(`[smartExtractor] Gemini text parser extracted a usable card`);
+      const sourceEngine = bestCandidate.engine === "tesseract" ? "Tesseract OCR" : "RapidOCR";
+      return {
+        fields: t3Merged,
+        engine: `Gemini Text fallback (${sourceEngine} input)`,
+      };
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.log(`[smartExtractor] Tier 3A Failed (${message}) — falling back to Tier 3B Gemini Vision`);
+    console.log(`[smartExtractor] Gemini text parser failed (${message}); continuing to Gemini Vision`);
   }
 
-  return null; // Triggers Tier 3B Gemini Vision fallback
+  return null;
 }

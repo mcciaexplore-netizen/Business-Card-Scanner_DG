@@ -34,6 +34,12 @@ function mergePhones(front: string, back: string): string {
   return merged.join(" / ");
 }
 
+function mergeExtractionEngines(front: string, back: string): string {
+  if (!front) return back;
+  if (!back || front === back) return front;
+  return `Front: ${front}; Back: ${back}`;
+}
+
 /**
  * Merges two Address strings, deduplicating identical comma-separated parts
  * and concatenating the rest.
@@ -61,7 +67,7 @@ function mergeAddresses(front: string, back: string): string {
  *
  * Rules:
  * - Name / Designation: front preferred; fall back to back if front empty.
- * - Company / Email / Website: front preferred; fall back to back.
+ * - Company / Industry / Email / Website: front preferred; fall back to back.
  * - Phone: concatenate both sides, deduplicated by normalised digit sequence.
  * - Address: concatenate both sides, deduplicated by comma-separated parts.
  */
@@ -69,10 +75,15 @@ export function mergeCardSides(front: CardFields, back: CardFields): CardFields 
   return {
     Name:        front.Name        || back.Name,
     Company:     front.Company     || back.Company,
+    Industry:    front.Industry    || back.Industry,
     Designation: front.Designation || back.Designation,
     Phone:       mergePhones(front.Phone, back.Phone),
     Email:       front.Email       || back.Email,
     Website:     front.Website     || back.Website,
     Address:     mergeAddresses(front.Address, back.Address),
+    "Extraction Engine": mergeExtractionEngines(
+      front["Extraction Engine"],
+      back["Extraction Engine"]
+    ),
   };
 }

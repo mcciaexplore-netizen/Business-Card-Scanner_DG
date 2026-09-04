@@ -1,10 +1,10 @@
 import { getGeminiClient, GEMINI_MODEL, detectMimeType } from "./geminiClient";
-import { FIELD_NAMES, CardFields } from "./types";
+import { EXTRACTED_FIELD_NAMES, CardFields, emptyFields } from "./types";
 
 const RESPONSE_SCHEMA = {
   type: "object",
-  properties: Object.fromEntries(FIELD_NAMES.map((n) => [n, { type: "string" }])),
-  required: [...FIELD_NAMES],
+  properties: Object.fromEntries(EXTRACTED_FIELD_NAMES.map((n) => [n, { type: "string" }])),
+  required: [...EXTRACTED_FIELD_NAMES],
 };
 
 const EXTRACTION_PROMPT = `You are reading a single business card image. Extract
@@ -28,18 +28,23 @@ Rules:
     before the number (e.g. "+1 555-123-4567") or inside parentheses
     (e.g. "(+91) 98765 43210").
 - "Website": normalize to the domain as printed (no need to add https://).
+- "Industry": return one concise, high-level business sector based on the
+  company name, website/email domain, and any products or services printed on
+  the card (for example "Banking & Financial Services" or "Automotive &
+  Mobility"). If the evidence is insufficient, return "Unclassified".
 - "Address": combine a multi-line postal address into a single line,
   separated by commas.
-- If a field is not present on the card, return an empty string "" for it -
-  never guess or invent data.
+- For contact fields not present on the card, return an empty string "" -
+  never guess or invent contact data. Industry may only be inferred using the
+  evidence described above.
 - The card may be photographed at an angle, sideways, or upside down -
   read it correctly regardless of orientation.
 `;
 
 /**
  * Sends one business-card image to Gemini Vision and returns a dict of
- * mapped fields (Name, Company, Designation, Phone, Email, Website,
- * Address), ready to hand to storage.appendRow().
+ * mapped fields (Name, Company, Industry, Designation, Phone, Email,
+ * Website, Address), ready to hand to storage.appendRow().
  */
 export async function extractCardFields(imageBytes: Buffer): Promise<CardFields> {
   const ai = getGeminiClient();
@@ -65,8 +70,8 @@ export async function extractCardFields(imageBytes: Buffer): Promise<CardFields>
     throw new Error(`Could not parse Gemini's response as JSON: ${text}`);
   }
 
-  const result = {} as CardFields;
-  for (const name of FIELD_NAMES) {
+  const result = emptyFields();
+  for (const name of EXTRACTED_FIELD_NAMES) {
     result[name] = String(data[name] ?? "").trim();
   }
   return result;

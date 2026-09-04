@@ -56,7 +56,7 @@ export interface DetectedBox {
   xmax: number;
 }
 
-import { detectOpenCvBoxes } from "./enhancement/paddleOcrClient";
+import { detectOpenCvBoxes } from "./enhancement/rapidOcrClient";
 
 export async function detectCardBoxes(imageBytes: Buffer): Promise<DetectedBox[]> {
   try {

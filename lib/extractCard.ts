@@ -1,19 +1,29 @@
-import { runOcr } from "./ocr";
-import { parseCardText } from "./parseCardText";
 import { extractCardFields } from "./gemini";
 import { smartExtractCard } from "./enhancement/smartExtractor";
 import { CardFields } from "./types";
+import { withDetectedIndustry } from "./industry";
+import { normalizePhoneNumbers } from "./phone";
 
-const OCR_CONFIDENCE_THRESHOLD = 70;
+function finalizeCard(fields: CardFields, engine: string): CardFields {
+  const classified = withDetectedIndustry(fields);
+  return {
+    ...classified,
+    Phone: normalizePhoneNumbers(classified.Phone),
+    "Extraction Engine": engine,
+  };
+}
 
 /**
  * Enhanced OCR-first extraction:
- * Uses smartExtractCard (OpenCV + RapidOCR + Text-Only Gemini LLM) to minimize cost locally.
- * Falls back to fast Gemini Vision call if local OCR fails or takes longer than 3.5s.
+ * Tesseract runs first, RapidOCR is the second 70%-confidence OCR stage,
+ * Gemini text parses the best OCR output, and Gemini Vision is the final fallback.
  */
 export async function extractCard(imageBytes: Buffer): Promise<CardFields> {
   const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-  const MAX_SMART_TIMEOUT = isServerless ? 3000 : 8000;
+  // The old 3-second serverless deadline prevented the 5-second RapidOCR
+  // request from ever finishing. Leave enough time for the requested second
+  // OCR stage while retaining headroom inside the route's 60-second limit.
+  const MAX_SMART_TIMEOUT = isServerless ? 10000 : 20000;
 
   try {
     const smartPromise = smartExtractCard(imageBytes);
@@ -23,7 +33,7 @@ export async function extractCard(imageBytes: Buffer): Promise<CardFields> {
 
     const smartFields = await Promise.race([smartPromise, timeoutPromise]);
     if (smartFields) {
-      return smartFields;
+      return finalizeCard(smartFields.fields, smartFields.engine);
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -31,5 +41,5 @@ export async function extractCard(imageBytes: Buffer): Promise<CardFields> {
   }
 
   console.log(`[extractCard] Running Cloud Gemini Vision API extraction...`);
-  return extractCardFields(imageBytes);
+  return finalizeCard(await extractCardFields(imageBytes), "Gemini Vision fallback");
 }

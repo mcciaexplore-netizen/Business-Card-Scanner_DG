@@ -1,5 +1,5 @@
 /**
- * AuraScan storage endpoint.
+ * AuraScan storage and shared traffic-control endpoint.
  *
  * Deploy this as a Web App (Deploy > New deployment > Web app) with:
  *   Execute as:      Me
@@ -32,7 +32,22 @@ var SHARED_SECRET = 'CHANGE-THIS-TO-A-LONG-RANDOM-SECRET';
 
 var SPREADSHEET_TITLE = 'Business Card Scanner - DG';
 var SHEET_NAME = 'Business Cards';
-var HEADERS = ['Name', 'Company', 'Designation', 'Phone', 'Email', 'Website', 'Address'];
+var HEADERS = [
+  'Name', 'Company', 'Industry', 'Designation', 'Phone', 'Email', 'Website',
+  'Address', 'Extraction Engine'
+];
+var MAX_FIELD_LENGTH = 5000;
+
+// Generous organizational abuse ceilings. These are shared across every
+// serverless instance because Apps Script owns the counters.
+var NORMAL_BROWSER_LIMIT_PER_MINUTE = 10;
+var NORMAL_IP_LIMIT_PER_MINUTE = 30;
+var GLOBAL_HARD_LIMIT_PER_MINUTE = 120;
+var BULK_BROWSER_LIMIT_PER_TEN_MINUTES = 5;
+var GLOBAL_CONCURRENT_BULK_LIMIT = 3;
+// Slightly longer than the bulk route's 300-second Fluid Compute duration so
+// a live job retains its global concurrency permit until it finishes.
+var BULK_LEASE_MS = 330000;
 
 function doPost(e) {
   try {
@@ -42,10 +57,24 @@ function doPost(e) {
       return jsonResponse({ status: 'error', message: 'Invalid secret.' });
     }
 
+    var action = body.action || 'append_card';
+    if (action === 'rate_check') {
+      return jsonResponse(checkRateLimits_(body));
+    }
+    if (action === 'release_bulk') {
+      releaseBulkLease_(body.bulkLeaseId);
+      return jsonResponse({ status: 'ok' });
+    }
+    if (action !== 'append_card') {
+      return jsonResponse({ status: 'error', message: 'Unknown action.' });
+    }
+
     var fields = body.fields || {};
     var sheet = getOrCreateSheet_();
-    var row = HEADERS.map(function (h) { return fields[h] || ''; });
-    sheet.appendRow(row);
+    var row = HEADERS.map(function (h) { return toSheetSafeText_(fields[h]); });
+    var target = sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length);
+    target.setNumberFormat('@');
+    target.setValues([row]);
 
     return jsonResponse({ status: 'ok' });
   } catch (err) {
@@ -53,7 +82,7 @@ function doPost(e) {
   }
 }
 
-function doGet(e) {
+function doGet() {
   // Simple health check so the backend can confirm this endpoint is
   // reachable at startup without writing anything.
   return jsonResponse({ status: 'ok', message: 'AuraScan Apps Script endpoint is running.' });
@@ -92,7 +121,188 @@ function getOrCreateSheet_() {
     sheet.setFrozenRows(1);
   }
 
+  ensureHeaders_(sheet);
   return sheet;
+}
+
+/**
+ * Adds newly introduced columns to sheets created by older deployments.
+ * Existing historical rows remain aligned and receive blank values in the new
+ * columns; only newly scanned cards contain the added metadata.
+ */
+function ensureHeaders_(sheet) {
+  var lastColumn = Math.max(sheet.getLastColumn(), 1);
+  var currentHeaders = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
+
+  if (currentHeaders.indexOf('Industry') === -1) {
+    var companyIndex = currentHeaders.indexOf('Company');
+    if (companyIndex >= 0) {
+      sheet.insertColumnAfter(companyIndex + 1);
+    }
+  }
+
+  lastColumn = Math.max(sheet.getLastColumn(), 1);
+  currentHeaders = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
+  if (currentHeaders.indexOf('Extraction Engine') === -1) {
+    var addressIndex = currentHeaders.indexOf('Address');
+    if (addressIndex >= 0) {
+      sheet.insertColumnAfter(addressIndex + 1);
+    }
+  }
+
+  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+  sheet.setFrozenRows(1);
+}
+
+/** Store untrusted OCR/model output as bounded text, never as a formula. */
+function toSheetSafeText_(value) {
+  var text = value == null ? '' : String(value);
+  text = text.substring(0, MAX_FIELD_LENGTH);
+  return /^[=+\-@]/.test(text) ? "'" + text : text;
+}
+
+function checkRateLimits_(body) {
+  var mode = String(body.mode || 'single');
+  var clientId = stableKey_(body.clientId || 'unknown-client');
+  var ipHash = stableKey_(body.ipHash || 'unknown-ip');
+  var now = Date.now();
+  var lock = LockService.getScriptLock();
+
+  // Rate-limit infrastructure must not prevent ordinary scanning when Google
+  // is briefly busy. The caller also fails open on network errors.
+  if (!lock.tryLock(3000)) {
+    return { status: 'ok' };
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  var cache = CacheService.getScriptCache();
+  var result;
+
+  try {
+    var rules = [
+      { key: 'RATE_GLOBAL', windowMs: 60000, limit: GLOBAL_HARD_LIMIT_PER_MINUTE }
+    ];
+
+    if (mode === 'bulk') {
+      rules.push({
+        key: 'RATE_BULK_BROWSER_' + clientId,
+        windowMs: 600000,
+        limit: BULK_BROWSER_LIMIT_PER_TEN_MINUTES
+      });
+    } else {
+      rules.push({
+        key: 'RATE_NORMAL_BROWSER_' + clientId,
+        windowMs: 60000,
+        limit: NORMAL_BROWSER_LIMIT_PER_MINUTE
+      });
+      rules.push({
+        key: 'RATE_NORMAL_IP_' + ipHash,
+        windowMs: 60000,
+        limit: NORMAL_IP_LIMIT_PER_MINUTE
+      });
+    }
+
+    var states = rules.map(function (rule) {
+      return {
+        rule: rule,
+        state: getWindowState_(cache, rule.key, now, rule.windowMs)
+      };
+    });
+
+    var blocked = states.filter(function (entry) {
+      return entry.state.count >= entry.rule.limit;
+    });
+
+    if (blocked.length > 0) {
+      var retryAfterMs = Math.max.apply(null, blocked.map(function (entry) {
+        return Math.max(1000, entry.state.startedAt + entry.rule.windowMs - now);
+      }));
+      return {
+        status: 'limited',
+        retryAfterSeconds: Math.ceil(retryAfterMs / 1000),
+        message: 'The scanner is receiving unusually high traffic. Please try again shortly.'
+      };
+    }
+
+    var bulkLeaseId = '';
+    if (mode === 'bulk') {
+      var leases = getActiveBulkLeases_(props, now);
+      if (leases.length >= GLOBAL_CONCURRENT_BULK_LIMIT) {
+        return {
+          status: 'limited',
+          retryAfterSeconds: 30,
+          message: 'Three bulk scans are already running. Please try again shortly.'
+        };
+      }
+      bulkLeaseId = Utilities.getUuid();
+      leases.push({ id: bulkLeaseId, expiresAt: now + BULK_LEASE_MS });
+      props.setProperty('ACTIVE_BULK_LEASES', JSON.stringify(leases));
+    }
+
+    states.forEach(function (entry) {
+      entry.state.count += 1;
+      cache.put(
+        entry.rule.key,
+        JSON.stringify(entry.state),
+        Math.ceil(entry.rule.windowMs / 1000) + 5
+      );
+    });
+
+    result = { status: 'ok', bulkLeaseId: bulkLeaseId || undefined };
+  } finally {
+    lock.releaseLock();
+  }
+
+  return result;
+}
+
+function getWindowState_(cache, key, now, windowMs) {
+  var raw = cache.get(key);
+  if (raw) {
+    try {
+      var state = JSON.parse(raw);
+      if (state.startedAt && now - Number(state.startedAt) < windowMs) {
+        return { startedAt: Number(state.startedAt), count: Number(state.count) || 0 };
+      }
+    } catch (ignored) {}
+  }
+  return { startedAt: now, count: 0 };
+}
+
+function stableKey_(value) {
+  var digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(value),
+    Utilities.Charset.UTF_8
+  );
+  return digest.map(function (byte) {
+    var normalized = byte < 0 ? byte + 256 : byte;
+    return ('0' + normalized.toString(16)).slice(-2);
+  }).join('').substring(0, 24);
+}
+
+function getActiveBulkLeases_(props, now) {
+  try {
+    var leases = JSON.parse(props.getProperty('ACTIVE_BULK_LEASES') || '[]');
+    return leases.filter(function (lease) { return Number(lease.expiresAt) > now; });
+  } catch (ignored) {
+    return [];
+  }
+}
+
+function releaseBulkLease_(leaseId) {
+  if (!leaseId) return;
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var leases = getActiveBulkLeases_(props, Date.now()).filter(function (lease) {
+      return lease.id !== String(leaseId);
+    });
+    props.setProperty('ACTIVE_BULK_LEASES', JSON.stringify(leases));
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function jsonResponse(obj) {

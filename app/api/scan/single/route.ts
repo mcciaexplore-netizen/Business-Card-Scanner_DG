@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractCard } from "@/lib/extractCard";
 import { appendRow } from "@/lib/storage";
 import { SingleScanResult } from "@/lib/types";
+import {
+  beginScanRequest,
+  rateLimitedResponse,
+  withScanClientCookie,
+} from "@/lib/scanControl";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -9,26 +14,29 @@ export const maxDuration = 60;
 const MAX_UPLOAD_BYTES = (Number(process.env.MAX_UPLOAD_MB) || 15) * 1024 * 1024;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const permit = await beginScanRequest(req, "single");
+  if (!permit.allowed) return rateLimitedResponse(permit);
+
+  const respond = (body: unknown, status?: number) =>
+    withScanClientCookie(NextResponse.json(body, status ? { status } : undefined), permit);
+
   let file: File;
   try {
     const formData = await req.formData();
-    const f = formData.get("file");
-    if (!(f instanceof File)) {
-      return NextResponse.json({ detail: "No file uploaded." }, { status: 400 });
+    const uploaded = formData.get("file");
+    if (!(uploaded instanceof File)) {
+      return respond({ detail: "No file uploaded." }, 400);
     }
-    file = f;
+    file = uploaded;
   } catch {
-    return NextResponse.json({ detail: "Could not read the uploaded file." }, { status: 400 });
+    return respond({ detail: "Could not read the uploaded file." }, 400);
   }
 
   if (file.size === 0) {
-    return NextResponse.json({ detail: "Uploaded file is empty." }, { status: 400 });
+    return respond({ detail: "Uploaded file is empty." }, 400);
   }
   if (file.size > MAX_UPLOAD_BYTES) {
-    return NextResponse.json(
-      { detail: `File exceeds ${process.env.MAX_UPLOAD_MB || 15}MB limit.` },
-      { status: 413 }
-    );
+    return respond({ detail: `File exceeds ${process.env.MAX_UPLOAD_MB || 15}MB limit.` }, 413);
   }
 
   const bytes = Buffer.from(await file.arrayBuffer());
@@ -36,8 +44,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let fields;
   try {
     fields = await extractCard(bytes);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     const result: SingleScanResult = {
       detected: 1,
       saved: 0,
@@ -45,13 +53,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       message: `Could not read this card: ${message}`,
       card: null,
     };
-    return NextResponse.json(result);
+    return respond(result);
   }
 
   try {
     await appendRow(fields);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     const result: SingleScanResult = {
       detected: 1,
       saved: 0,
@@ -59,7 +67,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       message: `The card was read but could not be saved: ${message}`,
       card: fields,
     };
-    return NextResponse.json(result);
+    return respond(result);
   }
 
   const result: SingleScanResult = {
@@ -69,5 +77,5 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     message: "Card scanned and saved.",
     card: fields,
   };
-  return NextResponse.json(result);
+  return respond(result);
 }

@@ -9,22 +9,28 @@ the script); only the application code changed language.
 
 ## What changed from the Python version
 
-- **Card detection no longer uses OpenCV.** Vercel serverless functions
-  don't support Python + OpenCV cleanly (that's what caused the original
-  404 deploy failure). Instead, **Gemini itself finds every card in the
-  bulk photo** and returns a bounding box for each one (a documented
-  Gemini vision capability), and each box is cropped out of the original
-  full-resolution image using `jimp` (a pure-JavaScript image library
-  with **zero native dependencies** - chosen specifically over `sharp`,
-  whose native binaries are a common, well-documented cause of "works
-  locally, fails on Vercel" deploys).
-- **Single-card extraction is unchanged in substance** - same prompt,
-  same rules (including the detailed multi-number/parentheses Phone
-  rule), same Gemini model, just written in TypeScript instead of Python.
-- **Storage is the same Apps Script webhook** - `apps-script/Code.gs` is
-  identical to the Python version's; it doesn't care what language calls
-  it. `lib/storage.ts` is a line-for-line concept port of
-  `storage_client.py`.
+- **Card detection uses OpenCV when the optional local OCR sidecar is
+  available, then falls back to Gemini.** Each detected box is cropped from
+  the full-resolution image with `jimp`, which has no native dependency.
+- **Card text extraction now has two confidence-gated OCR attempts before
+  Gemini Vision.** Tesseract runs first in supported local environments. If
+  it is below 70% confidence or cannot produce a complete card, the existing
+  RapidOCR/ONNX sidecar gets the second attempt at the same 70% threshold.
+  Gemini text parsing and then Gemini Vision remain the cloud fallbacks.
+- **Single-card extraction now returns an Industry field** in addition to
+  the contact data. Gemini classifies it from the company and domain context,
+  with a deterministic offline fallback when cloud classification is absent.
+- **Phone and other extracted values are stored as text safely.** Values that
+  could be interpreted as spreadsheet formulas are escaped before storage.
+  Printed country codes, leading zeros, parentheses, spaces, and dashes are
+  preserved; equivalent duplicates are removed and multiple numbers use ` / `.
+- **Every newly scanned row records its extraction engine.** The sheet shows
+  `Tesseract OCR`, `RapidOCR`, `Gemini Text fallback (...)`, or `Gemini Vision
+  fallback`. Two-sided scans record both engines when they differ.
+- **Storage remains an Apps Script webhook.** `apps-script/Code.gs` now
+  migrates older sheets to the nine-column schema and forces submitted
+  values to safe text. `lib/storage.ts` applies the same safety rule before
+  making the webhook request.
 - **The frontend is now real React** (this was also part of the ask) -
   same visual design, same dark "AuraScan" theme, same camera
   capture/drag-drop/stats behavior, rebuilt as components instead of
@@ -35,40 +41,62 @@ the script); only the application code changed language.
 ```
 Browser (React)
    │
-   ├─ POST /api/scan/single ──► Gemini (extract 7 fields) ──► Apps Script webhook
+   ├─ POST /api/scan/single or /double
+   │        ├─► Shared Apps Script rate check
+   │        └─► Tesseract (>=70%)
+   │              └─► RapidOCR sidecar (>=70%)
+   │                    └─► Gemini text
+   │                          └─► Gemini Vision
+   │                                └─► Apps Script card storage
    │
-   └─ POST /api/scan/bulk   ──► Gemini (find every card's bounding box)
-                                   │
-                                   ▼
-                              jimp crops each box out of the original image
-                                   │
-                                   ▼
-                    Gemini (extract 7 fields) per crop, several at once
-                                   │
-                                   ▼
-                         Apps Script webhook, once per card
+   └─ POST /api/scan/bulk
+            ├─► Shared Apps Script rate + bulk-permit check
+            └─► OpenCV sidecar or Gemini card detection
+                  └─► jimp crop per card
+                        └─► same extraction pipeline above
 ```
 
-## Important limitation: bulk scan and serverless time limits
+The shared rate check fails open if Apps Script is temporarily unavailable;
+card storage errors still fail visibly so the UI never claims an unsaved card
+was saved.
+
+## Recommended organizational operating mode
+
+The deployed control layer is tuned for new-card scanning with occasional
+bursts:
+
+- single/double: 10 requests per browser per minute and 30 per IP per minute;
+- global: hard burst stop at 120 requests/minute;
+- bulk: 5 starts per browser per 10 minutes, 3 concurrent bulk jobs globally,
+  and up to 50 detected cards per request.
+
+Excess burst traffic receives HTTP `429` with a retry time. Anonymous browser
+IDs and salted IP hashes are used only for abuse controls. There is currently
+no monitoring sheet, email alert, scheduled summary, or kill switch.
+
+## Bulk scan and Vercel execution time
 
 This is a real architectural trade-off worth understanding, not just a
 footnote. A long-running Python server has no per-request time limit;
-**Vercel serverless functions do**. Each card in a bulk scan costs two
-Gemini calls (its crop's extraction, plus its share of the detection
-call) and one webhook POST. To keep total time reasonable:
+**Vercel Functions do**. Bulk detection runs once, then every crop goes through
+the OCR/Gemini fallback pipeline and one sheet write. To keep total time
+reasonable:
 
 - Cards are processed **concurrently** (5 at a time by default, see
   `CARD_CONCURRENCY` in `app/api/scan/bulk/route.ts`), not one at a time.
-- `maxDuration` is set to 60 seconds - the safe default that works on
-  every Vercel plan (Hobby included) with no extra configuration.
+- The bulk route requests `maxDuration = 300` seconds. Enable Fluid Compute in
+  Vercel so the project receives the current five-minute Hobby allowance (and
+  longer paid-plan allowances).
 
-For a genuinely large batch (20-30+ cards) this **may still not be
-enough time** on the Hobby plan. If you hit timeouts:
-- Upgrade to **Vercel Pro**, which allows raising `maxDuration`
-  significantly (see [Vercel's function
-  duration docs](https://vercel.com/docs/functions/configuring-functions/duration)
-  for current limits - these change over time, check before relying on a
-  specific number), and raise it in `app/api/scan/bulk/route.ts`.
+For work that can exceed five minutes, do not keep extending one browser HTTP
+request. Upload the source image to object storage, enqueue a durable bulk job,
+process cards idempotently in a queue/worker, and let the browser poll job
+status. This survives function restarts and permits safe retries. In the short
+term:
+
+- On Pro, raise `maxDuration` within the plan's current allowance after
+  confirming Fluid Compute is enabled (see [Vercel Function
+  limits](https://vercel.com/docs/functions/limitations)).
 - Or lower `CARD_CONCURRENCY` if you're hitting Gemini rate limits rather
   than the time limit (the symptom looks similar but the fix is
   opposite - profile before changing this).
@@ -91,7 +119,7 @@ not a change to the crop/extraction logic.
 
 ## Setup
 
-### 1. Deploy the Apps Script (identical to the Python version)
+### 1. Deploy the Apps Script
 
 1. Go to [script.google.com](https://script.google.com) → **New project**.
 2. Delete the default code, paste in the entire contents of
@@ -101,6 +129,12 @@ not a change to the crop/extraction logic.
    Who has access **Anyone** → **Deploy**. Authorize when prompted (the
    one-time, owner-only consent step).
 5. Copy the **Web app URL**.
+
+If upgrading an existing deployment, paste the updated `Code.gs` and create a
+new deployment version. On the next saved card it inserts `Industry` after
+`Company` and `Extraction Engine` after `Address`, preserving the alignment of
+historical rows. It also stores incoming fields as plain text so phone numbers
+containing `+`, `-`, `/` or parentheses cannot become formulas.
 
 ### 2. Get a Gemini API key
 
@@ -122,6 +156,21 @@ npm run dev
 
 Open **http://localhost:3000**.
 
+### 3a. Start the optional second OCR engine
+
+RapidOCR is the second OCR stage after Tesseract. Install the sidecar
+dependencies and start it in a separate terminal:
+
+```bash
+python -m pip install -r ocr-service/requirements.txt
+start-ocr-service.bat
+```
+
+RapidOCR is opt-in. Set `OCR_SERVICE_URL=http://127.0.0.1:8000` for local use.
+Leave it unset for a temporary Vercel deployment; the app skips the sidecar
+without making a localhost request and continues directly to Gemini. A future
+production sidecar must use a hosted HTTPS URL.
+
 ### 4. Deploy to Vercel
 
 ```bash
@@ -139,6 +188,7 @@ uploaded or used in production, it's local-dev only:
 - `APPS_SCRIPT_URL`
 - `APPS_SCRIPT_SECRET`
 - `MAX_UPLOAD_MB` (optional, defaults to `15`)
+- `OCR_SERVICE_URL` (optional; omit until a hosted RapidOCR service exists)
 
 Redeploy after adding/changing env vars (Vercel doesn't hot-reload them
 into already-running deployments).
@@ -175,6 +225,8 @@ aurascan-nextjs/
 │   └── icons.tsx
 ├── lib/
 │   ├── gemini.ts              # single-card extraction (port of ocr_extractor.py)
+│   ├── industry.ts            # direct industry/domain classifier fallback
+│   ├── sheetSafety.ts         # spreadsheet formula-injection protection
 │   ├── detectCards.ts         # Gemini bounding boxes + jimp cropping (replaces OpenCV)
 │   ├── storage.ts              # Apps Script webhook client (port of storage_client.py)
 │   ├── concurrency.ts          # bounded-concurrency helper for bulk scan

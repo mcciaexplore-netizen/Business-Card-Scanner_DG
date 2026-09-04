@@ -1,11 +1,17 @@
-export const FIELD_NAMES = [
+export const EXTRACTED_FIELD_NAMES = [
   "Name",
   "Company",
+  "Industry",
   "Designation",
   "Phone",
   "Email",
   "Website",
   "Address",
+] as const;
+
+export const FIELD_NAMES = [
+  ...EXTRACTED_FIELD_NAMES,
+  "Extraction Engine",
 ] as const;
 
 export type FieldName = (typeof FIELD_NAMES)[number];

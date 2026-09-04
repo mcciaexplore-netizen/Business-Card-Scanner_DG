@@ -239,7 +239,7 @@ function extractDesignationFromDirtyLine(line: string): string {
 // Public types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface ParsedCard {
+interface ParsedCard {
   fields: CardFields;
   missingRequired: boolean;
 }
