@@ -2,6 +2,7 @@
 
 import { FIELD_NAMES } from "@/lib/types";
 import type { BulkCardResult } from "@/lib/types";
+import { IndustryResearch } from "./IndustryResearch";
 
 export function BulkResultsList({ cards }: { cards: BulkCardResult[] }) {
   return (
@@ -18,9 +19,9 @@ export function BulkResultsList({ cards }: { cards: BulkCardResult[] }) {
             </div>
             <div className="bulk-item-fields">
               {FIELD_NAMES.map((key) => (
-                <div key={key} className={key === "Address" ? "span-2" : undefined}>
+                <div key={key} className={key === "Address" || key === "Industry Sources" ? "span-2" : undefined}>
                   <div className="f-label">{key}</div>
-                  <div className="f-value">{card[key]?.trim() ? card[key] : "—"}</div>
+                  <div className="f-value">{key === "Industry Sources" ? <IndustryResearch fields={card} /> : card[key]?.trim() ? card[key] : "—"}</div>
                 </div>
               ))}
             </div>

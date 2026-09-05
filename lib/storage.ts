@@ -1,5 +1,6 @@
 import { CardFields, FIELD_NAMES } from "./types";
 import { toSheetSafeText } from "./sheetSafety";
+import { assertAppsScriptSaved } from "./appsScriptResponse";
 
 export { toSheetSafeText } from "./sheetSafety";
 
@@ -37,6 +38,7 @@ export async function appendRow(fields: CardFields): Promise<void> {
   const safeFields = prepareFieldsForStorage(fields);
 
   let response: Response;
+  let responseText: string;
   try {
     response = await fetch(url, {
       method: "POST",
@@ -44,29 +46,14 @@ export async function appendRow(fields: CardFields): Promise<void> {
       body: JSON.stringify({ secret, fields: safeFields }),
       signal: controller.signal,
     });
+    // Keep the deadline active while reading the redirected response body too.
+    responseText = await response.text();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    throw new Error(`Could not reach the Apps Script endpoint: ${message}`);
+    throw new Error(`Could not receive Apps Script save confirmation: ${message}. Check the sheet before retrying to avoid duplicates.`);
   } finally {
     clearTimeout(timeout);
   }
 
-  const responseText = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`Apps Script endpoint returned HTTP ${response.status}: ${responseText.slice(0, 300)}`);
-  }
-
-  let data: { status?: string; message?: string };
-  try {
-    data = JSON.parse(responseText);
-  } catch {
-    throw new Error(
-      `Apps Script endpoint returned a non-JSON response (check that it's deployed with access 'Anyone'): ${responseText.slice(0, 300)}`
-    );
-  }
-
-  if (data.status !== "ok") {
-    throw new Error(`Apps Script reported an error: ${data.message ?? "unknown error"}`);
-  }
+  assertAppsScriptSaved(responseText, response.status);
 }

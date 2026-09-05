@@ -1,4 +1,5 @@
 import { CardFields } from "./types";
+import { isClassifiedIndustry } from "./industry";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phone deduplication helpers
@@ -72,10 +73,15 @@ function mergeAddresses(front: string, back: string): string {
  * - Address: concatenate both sides, deduplicated by comma-separated parts.
  */
 export function mergeCardSides(front: CardFields, back: CardFields): CardFields {
+  const industrySide = isClassifiedIndustry(front.Industry) ? front : back;
   return {
+    ...front,
     Name:        front.Name        || back.Name,
     Company:     front.Company     || back.Company,
-    Industry:    front.Industry    || back.Industry,
+    Industry:    industrySide.Industry || "Unclassified",
+    "Industry Source": industrySide["Industry Source"],
+    "Industry Sources": industrySide["Industry Sources"],
+    industrySearchHtml: industrySide.industrySearchHtml,
     Designation: front.Designation || back.Designation,
     Phone:       mergePhones(front.Phone, back.Phone),
     Email:       front.Email       || back.Email,

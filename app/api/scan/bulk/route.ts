@@ -4,6 +4,9 @@ import { detectCardBoxes, cropCard } from "@/lib/detectCards";
 import { appendRow } from "@/lib/storage";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { BulkCardResult, BulkScanResult, emptyFields } from "@/lib/types";
+import { readDepartment } from "@/lib/departments";
+import { enrichIndustry } from "@/lib/industry";
+import { searchCompanyIndustry } from "@/lib/industrySearch";
 import {
   beginScanRequest,
   rateLimitedResponse,
@@ -22,6 +25,7 @@ const CARD_CONCURRENCY = 5;
 const MAX_BULK_CARDS = 50;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const startedAt = Date.now();
   const permit = await beginScanRequest(req, "bulk");
   if (!permit.allowed) return rateLimitedResponse(permit);
 
@@ -30,15 +34,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   try {
     let file: File;
+    let department = "";
     try {
       const formData = await req.formData();
+      department = readDepartment(formData);
       const uploaded = formData.get("file");
       if (!(uploaded instanceof File)) {
         return respond({ detail: "No file uploaded." }, 400);
       }
       file = uploaded;
-    } catch {
-      return respond({ detail: "Could not read the uploaded file." }, 400);
+    } catch (error) {
+      return respond({ detail: error instanceof Error ? error.message : "Could not read the uploaded file." }, 400);
     }
 
     if (file.size === 0) {
@@ -88,12 +94,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       async (box) => {
         try {
           const cropBytes = await cropCard(bytes, box);
-          const fields = await extractCard(cropBytes);
+          const extracted = await extractCard(cropBytes);
+          extracted.Department = department;
+          const fields = await enrichIndustry(extracted, searchCompanyIndustry, Math.min(10000, 275000 - (Date.now() - startedAt)));
           await appendRow(fields);
           return { ...fields, _status: "saved" };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          return { ...emptyFields(), _status: `failed: ${message}` };
+          return { ...emptyFields(), Department: department, _status: `failed: ${message}` };
         }
       }
     );

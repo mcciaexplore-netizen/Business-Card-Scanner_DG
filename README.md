@@ -17,9 +17,11 @@ the script); only the application code changed language.
   it is below 70% confidence or cannot produce a complete card, the existing
   RapidOCR/ONNX sidecar gets the second attempt at the same 70% threshold.
   Gemini text parsing and then Gemini Vision remain the cloud fallbacks.
-- **Single-card extraction now returns an Industry field** in addition to
-  the contact data. Gemini classifies it from the company and domain context,
-  with a deterministic offline fallback when cloud classification is absent.
+- **Industry uses company and card-description evidence first.** Unresolved
+  sectors receive a bounded Google Search-grounded Gemini lookup. Ambiguous
+  companies stay `Unclassified`; search failures do not prevent saving cards.
+- **Department ownership is supported in every scan mode.** The dropdown is
+  ready for the organization's department list; see configuration below.
 - **Phone and other extracted values are stored as text safely.** Values that
   could be interpreted as spreadsheet formulas are escaped before storage.
   Printed country codes, leading zeros, parentheses, spaces, and dashes are
@@ -28,7 +30,7 @@ the script); only the application code changed language.
   `Tesseract OCR`, `RapidOCR`, `Gemini Text fallback (...)`, or `Gemini Vision
   fallback`. Two-sided scans record both engines when they differ.
 - **Storage remains an Apps Script webhook.** `apps-script/Code.gs` now
-  migrates older sheets to the nine-column schema and forces submitted
+  adds missing columns without moving existing ones and forces submitted
   values to safe text. `lib/storage.ts` applies the same safety rule before
   making the webhook request.
 - **The frontend is now real React** (this was also part of the ask) -
@@ -47,7 +49,8 @@ Browser (React)
    │              └─► RapidOCR sidecar (>=70%)
    │                    └─► Gemini text
    │                          └─► Gemini Vision
-   │                                └─► Apps Script card storage
+   │                                └─► Industry enrichment (web only if unresolved)
+   │                                      └─► Apps Script card storage
    │
    └─ POST /api/scan/bulk
             ├─► Shared Apps Script rate + bulk-permit check
@@ -130,11 +133,82 @@ not a change to the crop/extraction logic.
    one-time, owner-only consent step).
 5. Copy the **Web app URL**.
 
-If upgrading an existing deployment, paste the updated `Code.gs` and create a
-new deployment version. On the next saved card it inserts `Industry` after
-`Company` and `Extraction Engine` after `Address`, preserving the alignment of
-historical rows. It also stores incoming fields as plain text so phone numbers
-containing `+`, `-`, `/` or parentheses cannot become formulas.
+If upgrading, update the **same Apps Script project** and its deployment version
+to retain the saved `SPREADSHEET_ID`. Keep your existing secret. On the next saved
+card, missing headers are appended at the right edge; existing columns, custom
+columns and historical rows are not moved or relabelled. New rows are mapped by
+header name, and migration/row writes share a lock to prevent concurrent scans
+from allocating the same row. Existing rows remain blank in newly added columns.
+Incoming fields are plain text so phone numbers containing `+`, `-`, `/` or
+parentheses cannot become formulas. Redeploy the app and Apps Script together:
+an older script will not store the new metadata.
+
+### Department ownership and industry research
+
+- A basic starter list is configured in `DEPARTMENTS` in `lib/departments.ts`.
+  Replace those names with the organization's official departments when they
+  are available, then rebuild/redeploy the app. Users can choose a department or
+  leave the card as `Not assigned`; the backend accepts only configured names.
+- Single and double-sided cards use one selection. A bulk upload assigns the
+  selected department to **every card in that upload**. This is self-reported
+  ownership, not authentication or proof of who scanned the card.
+- The existing `Industry` column is the company's business sector, not its web
+  address. Product/service text and company evidence are used first; a person's
+  job title and generic company suffixes are not sufficient business evidence.
+- If the sector is still unresolved and a company name exists, the app uses
+  [Google Search grounding](https://ai.google.dev/gemini-api/docs/google-search)
+  through the existing Gemini key/model. Only company name and printed website
+  are sent to this additional lookup, not contact names, phone numbers, full
+  email addresses, or departments. There is no separate search API key.
+- A web sector is accepted only when the response declares an unambiguous
+  company match and includes a provider-grounded citation supporting the sector.
+  A same-name company without enough identity evidence remains `Unclassified`.
+  AI classification is still fallible; source links are supplied for review.
+- New rows include `Department`, `Industry Source`, and `Industry Sources`.
+  The existing `Extraction Engine` still describes the OCR/Gemini extraction,
+  independently of industry research. Source links and Google search suggestions
+  appear in scan results; suggestion HTML is isolated in a sandboxed frame and
+  is not stored in the sheet.
+- The optional lookup has a **10-second client timeout**. Single/double requests
+  stop starting searches after 35 seconds, bulk requests after 275 seconds, to
+  leave time for the existing sheet write. If search fails, is ambiguous, or has
+  no time left, the card is saved with `Unclassified` and an explanatory source
+  status. This is not a guarantee that the whole OCR request finishes in time.
+- Google Search grounding can add latency and provider charges/quota usage.
+  Verify availability for your Gemini project/model before rollout. No new
+  daily quota, monitoring, email, authentication, or kill switch is introduced.
+
+Validation: `npm test` runs offline tests, including scan-route ownership and
+historical-sheet migration. `node scripts/check-industry-search.mjs` runs a real
+public-company lookup with the configured Gemini key; it can incur API usage but
+does not upload a card or write to Google Sheets.
+
+### Troubleshooting an HTML response during save
+
+The Apps Script health response identifies revision `metadata-columns-jkl-4`. This
+version commits pending spreadsheet writes with `SpreadsheetApp.flush()` before
+releasing the write lock or claiming success, and returns the failure stage when
+an exception can be caught. The application removes inline HTML scripts/styles
+from Google's error pages to display the readable error instead. Platform-level
+authorization failures can still return HTML outside the script's error handler.
+Formatting now targets one scanner column at a time: Google Sheets tables can
+reject a number-format operation spanning several columns. Custom/blank columns
+are not formatted, and formatting is flushed before card values are submitted.
+
+After updating the Apps Script code, run `placeMetadataColumnsAtJToL` once from
+the Apps Script editor. It moves the complete existing metadata columns, including
+historical values, to `J:Department`, `K:Industry Source`, and
+`L:Industry Sources`, then clears their old locations. It stops without moving
+anything if J:L contain existing data, so those values cannot be overwritten.
+
+Deploy the updated code to the existing Apps Script deployment, preserving its
+secret and URL. Check **Execute as: Me** and the intended anonymous **Anyone**
+access. Then run `node scripts/check-storage.mjs` to check the deployed owner's
+spreadsheet/header access without adding rows or changing headers. It refuses
+to POST to older revisions that do not support the read-only diagnostic action.
+This confirms read access, not permission to edit protected cells or table formats.
+If a save response fails, check the sheet before retrying: errors are not proof
+that no row was written, and the application does not automatically retry writes.
 
 ### 2. Get a Gemini API key
 

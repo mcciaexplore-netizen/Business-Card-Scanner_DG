@@ -3,6 +3,9 @@ import { extractCard } from "@/lib/extractCard";
 import { mergeCardSides } from "@/lib/mergeCardFields";
 import { appendRow } from "@/lib/storage";
 import { SingleScanResult } from "@/lib/types";
+import { readDepartment } from "@/lib/departments";
+import { enrichIndustry } from "@/lib/industry";
+import { searchCompanyIndustry } from "@/lib/industrySearch";
 import {
   beginScanRequest,
   rateLimitedResponse,
@@ -22,6 +25,7 @@ async function parseFile(formData: FormData, key: string): Promise<Buffer | null
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const startedAt = Date.now();
   const permit = await beginScanRequest(req, "double");
   if (!permit.allowed) return rateLimitedResponse(permit);
 
@@ -30,9 +34,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   let frontBytes: Buffer | null = null;
   let backBytes: Buffer | null = null;
+  let department = "";
 
   try {
     const formData = await req.formData();
+    department = readDepartment(formData);
     frontBytes = await parseFile(formData, "file_front");
     backBytes = await parseFile(formData, "file_back");
   } catch (error) {
@@ -63,7 +69,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return respond(result);
   }
 
-  const merged = backFields ? mergeCardSides(frontFields, backFields) : frontFields;
+  const extracted = backFields ? mergeCardSides(frontFields, backFields) : frontFields;
+  extracted.Department = department;
+  // Research once, after combining both sides and their business descriptions.
+  const merged = await enrichIndustry(extracted, searchCompanyIndustry, Math.min(10000, 35000 - (Date.now() - startedAt)));
 
   try {
     await appendRow(merged);

@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractCard } from "@/lib/extractCard";
 import { appendRow } from "@/lib/storage";
 import { SingleScanResult } from "@/lib/types";
+import { readDepartment } from "@/lib/departments";
+import { enrichIndustry } from "@/lib/industry";
+import { searchCompanyIndustry } from "@/lib/industrySearch";
 import {
   beginScanRequest,
   rateLimitedResponse,
@@ -14,6 +17,7 @@ export const maxDuration = 60;
 const MAX_UPLOAD_BYTES = (Number(process.env.MAX_UPLOAD_MB) || 15) * 1024 * 1024;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const startedAt = Date.now();
   const permit = await beginScanRequest(req, "single");
   if (!permit.allowed) return rateLimitedResponse(permit);
 
@@ -21,15 +25,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     withScanClientCookie(NextResponse.json(body, status ? { status } : undefined), permit);
 
   let file: File;
+  let department = "";
   try {
     const formData = await req.formData();
+    department = readDepartment(formData);
     const uploaded = formData.get("file");
     if (!(uploaded instanceof File)) {
       return respond({ detail: "No file uploaded." }, 400);
     }
     file = uploaded;
-  } catch {
-    return respond({ detail: "Could not read the uploaded file." }, 400);
+  } catch (error) {
+    return respond({ detail: error instanceof Error ? error.message : "Could not read the uploaded file." }, 400);
   }
 
   if (file.size === 0) {
@@ -44,6 +50,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let fields;
   try {
     fields = await extractCard(bytes);
+    fields.Department = department;
+    fields = await enrichIndustry(fields, searchCompanyIndustry, Math.min(10000, 35000 - (Date.now() - startedAt)));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const result: SingleScanResult = {

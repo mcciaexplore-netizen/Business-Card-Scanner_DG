@@ -4,10 +4,12 @@ import { useState, useCallback, useEffect } from "react";
 import { Dropzone } from "./Dropzone";
 import { StatsRow } from "./StatsRow";
 import { BulkResultsList } from "./BulkResultsList";
+import { DepartmentSelect } from "./DepartmentSelect";
 import { CheckIcon, AlertIcon, GridIcon, ArrowLeftIcon } from "./icons";
 import type { BulkScanResult } from "@/lib/types";
 
 export function BulkScanPanel() {
+  const [department, setDepartment] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -54,6 +56,7 @@ export function BulkScanPanel() {
     try {
       const fd = new FormData();
       fd.append("file", file);
+      fd.append("department", department);
       const res = await fetch("/api/scan/bulk", { method: "POST", body: fd });
       
       const rawText = await res.text();
@@ -86,6 +89,7 @@ export function BulkScanPanel() {
   return (
     <section className="panel active">
       <div className="upload-card">
+        <DepartmentSelect value={department} onChange={setDepartment} disabled={scanning} bulk />
         <Dropzone
           onFile={handleFile}
           previewUrl={previewUrl}

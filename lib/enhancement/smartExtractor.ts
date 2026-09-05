@@ -4,6 +4,7 @@ import { isOcrServiceAvailable, runRapidOcr } from "./rapidOcrClient";
 import { extractCardFieldsLocalNlp } from "./localNlpExtractor";
 import { extractFieldsFromOcrText } from "./textGemini";
 import { CardFields } from "../types";
+import { detectIndustry } from "../industry";
 import {
   OcrCandidate,
   isOcrCandidateUsable,
@@ -75,6 +76,7 @@ function isCleanAddress(address: string): boolean {
  */
 function validateAndSanitiseFields(f: CardFields): CardFields {
   return {
+    ...f,
     Name:        isCleanName(f.Name)           ? f.Name        : "",
     Company:     isCleanCompany(f.Company)     ? f.Company     : "",
     Industry:    f.Industry,
@@ -104,6 +106,7 @@ function smartMerge(t1: CardFields, t2: CardFields): CardFields {
   }
 
   return {
+    ...t1,
     Name:        pick(t2.Name, t1.Name),
     Company:     pick(t2.Company, t1.Company),
     Industry:    pick(t2.Industry, t1.Industry),
@@ -152,6 +155,10 @@ function parseLocalCandidate(
 
   const { fields: t1Fields, missingRequired } = parseCardText(candidate.text);
   const t2Fields = extractCardFieldsLocalNlp(richOcrResult ?? candidate.text);
+  for (const fields of [t1Fields, t2Fields]) {
+    fields.Industry = detectIndustry(fields, candidate.text);
+    fields["Industry Source"] = "Card text (offline rules)";
+  }
   const validated = validateAndSanitiseFields(smartMerge(t1Fields, t2Fields));
 
   if (!missingRequired && isExtractionSuccessful(validateAndSanitiseFields(t1Fields))) {
@@ -271,6 +278,7 @@ export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtract
     if (cloudFields.Name || cloudFields.Phone || cloudFields.Email) {
       const localFields = partialResults.sort((a, b) => b.confidence - a.confidence)[0]?.fields;
       const t3Merged: CardFields = {
+        ...cloudFields,
         Name:        cloudFields.Name        || localFields?.Name        || "",
         Company:     cloudFields.Company     || localFields?.Company     || "",
         Industry:    cloudFields.Industry    || localFields?.Industry    || "",

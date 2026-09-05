@@ -5,6 +5,7 @@ import { Dropzone } from "./Dropzone";
 import { CameraCapture } from "./CameraCapture";
 import { StatsRow } from "./StatsRow";
 import { FieldList } from "./FieldList";
+import { DepartmentSelect } from "./DepartmentSelect";
 import { CheckIcon, AlertIcon, ImageIcon, CameraIcon, ArrowLeftIcon } from "./icons";
 import type { SingleScanResult } from "@/lib/types";
 
@@ -13,6 +14,7 @@ type Step   = "front" | "back" | "done";
 
 export function SingleScanPanel() {
   const [source, setSource] = useState<Source>("upload");
+  const [department, setDepartment] = useState("");
 
   // ── Per-step file & preview state ────────────────────────────────────────
   const [step,       setStep]       = useState<Step>("front");
@@ -94,6 +96,7 @@ export function SingleScanPanel() {
     try {
       const fd = new FormData();
       fd.append("file", frontFile);
+      fd.append("department", department);
       const res = await fetch("/api/scan/single", { method: "POST", body: fd });
       const rawText = await res.text();
       let data: SingleScanResult | { detail?: string; message?: string } | null = null;
@@ -133,6 +136,7 @@ export function SingleScanPanel() {
       const fd = new FormData();
       fd.append("file_front", frontFile);
       fd.append("file_back",  backFile);
+      fd.append("department", department);
       const res = await fetch("/api/scan/double", { method: "POST", body: fd });
       const rawText = await res.text();
       let data: SingleScanResult | { detail?: string; message?: string } | null = null;
@@ -160,6 +164,9 @@ export function SingleScanPanel() {
   return (
     <section className="panel active">
       <div className="upload-card">
+        {step !== "done" && (
+          <DepartmentSelect value={department} onChange={setDepartment} disabled={scanning} />
+        )}
 
         {/* ── Step indicator (shown during back-capture) ─────────────── */}
         {step === "back" && (

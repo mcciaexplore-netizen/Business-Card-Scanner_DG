@@ -355,12 +355,11 @@ export function extractCardFieldsLocalNlp(
   let designation = "";
   let designationLineIdx = -1;
   let company = "";
-  let companyLineIdx = -1;
   const addressLines: string[] = [];
   const unclassified: Array<{ text: string; wl: WorkLine; idx: number }> = [];
 
   for (let i = 0; i < classifyLines.length; i++) {
-    const { leftover, ocrLine } = classifyLines[i];
+    const { leftover } = classifyLines[i];
     const noise = lineNoiseScore(leftover);
 
     if (noise > 0.55) continue; // discard high-noise lines
@@ -393,7 +392,6 @@ export function extractCardFieldsLocalNlp(
         }
       }
       company = fullCompany;
-      companyLineIdx = i;
       continue;
     }
 

@@ -34,9 +34,15 @@ var SPREADSHEET_TITLE = 'Business Card Scanner - DG';
 var SHEET_NAME = 'Business Cards';
 var HEADERS = [
   'Name', 'Company', 'Industry', 'Designation', 'Phone', 'Email', 'Website',
-  'Address', 'Extraction Engine'
+  'Extraction Engine', 'Address', 'Department', 'Industry Source', 'Industry Sources'
+];
+var METADATA_COLUMN_LAYOUT = [
+  { header: 'Department', column: 10 },
+  { header: 'Industry Source', column: 11 },
+  { header: 'Industry Sources', column: 12 }
 ];
 var MAX_FIELD_LENGTH = 5000;
+var SCRIPT_REVISION = 'metadata-columns-jkl-4';
 
 // Generous organizational abuse ceilings. These are shared across every
 // serverless instance because Apps Script owns the counters.
@@ -50,6 +56,7 @@ var GLOBAL_CONCURRENT_BULK_LIMIT = 3;
 var BULK_LEASE_MS = 330000;
 
 function doPost(e) {
+  var stage = 'parse_request';
   try {
     var body = JSON.parse(e.postData.contents);
 
@@ -58,6 +65,11 @@ function doPost(e) {
     }
 
     var action = body.action || 'append_card';
+    stage = action;
+    if (action === 'diagnose_storage') {
+      // Authenticated and read-only: checks the deployed owner's sheet access.
+      return jsonResponse({ status: 'ok', revision: SCRIPT_REVISION, report: inspectScanSheet() });
+    }
     if (action === 'rate_check') {
       return jsonResponse(checkRateLimits_(body));
     }
@@ -69,23 +81,58 @@ function doPost(e) {
       return jsonResponse({ status: 'error', message: 'Unknown action.' });
     }
 
-    var fields = body.fields || {};
-    var sheet = getOrCreateSheet_();
-    var row = HEADERS.map(function (h) { return toSheetSafeText_(fields[h]); });
-    var target = sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length);
-    target.setNumberFormat('@');
-    target.setValues([row]);
+    // Serialize migration and row allocation: concurrent scans must not share
+    // the same lastRow + 1 or add the same new column twice.
+    var writeLock = LockService.getScriptLock();
+    if (!writeLock.tryLock(10000)) {
+      return jsonResponse({ status: 'error', message: 'Sheet is busy. Please try saving again.' });
+    }
+    try {
+      var fields = body.fields || {};
+      stage = 'open_sheet_and_check_headers';
+      var sheet = getOrCreateSheet_();
+      stage = 'map_columns';
+      var actualHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+      var row = actualHeaders.map(function (h) {
+        var field = canonicalHeader_(h);
+        return field ? toSheetSafeText_(fields[field]) : '';
+      });
+      var targetRow = sheet.getLastRow() + 1;
+      var target = sheet.getRange(targetRow, 1, 1, row.length);
+      stage = 'format_scanner_columns';
+      // Google Sheets tables reject column-level formatting across multiple
+      // columns. Format individual scanner cells, leaving custom/blank columns
+      // and existing rows alone.
+      actualHeaders.forEach(function (header, index) {
+        if (canonicalHeader_(header)) {
+          sheet.getRange(targetRow, index + 1, 1, 1).setNumberFormat('@');
+        }
+      });
+      // Surface formatting failures before submitting the new card values.
+      stage = 'commit_column_formats';
+      SpreadsheetApp.flush();
+      stage = 'write_row';
+      target.setValues([row]);
+      // Apps Script may defer spreadsheet operations. Commit while the lock
+      // is held and the error handler can still return a JSON failure.
+      stage = 'commit_sheet_changes';
+      SpreadsheetApp.flush();
+    } finally {
+      writeLock.releaseLock();
+    }
 
-    return jsonResponse({ status: 'ok' });
+    return jsonResponse({ status: 'ok', revision: SCRIPT_REVISION });
   } catch (err) {
-    return jsonResponse({ status: 'error', message: String(err) });
+    // Log the operation and exception, never request bodies or credentials.
+    console.error('AuraScan ' + SCRIPT_REVISION + ' failed at ' + stage + ': ' + String(err));
+    return jsonResponse({ status: 'error', message: String(err), stage: stage, revision: SCRIPT_REVISION });
   }
 }
 
 function doGet() {
   // Simple health check so the backend can confirm this endpoint is
   // reachable at startup without writing anything.
-  return jsonResponse({ status: 'ok', message: 'AuraScan Apps Script endpoint is running.' });
+  return jsonResponse({ status: 'ok', message: 'AuraScan Apps Script endpoint is running.', revision: SCRIPT_REVISION });
 }
 
 function getOrCreateSheet_() {
@@ -126,32 +173,132 @@ function getOrCreateSheet_() {
 }
 
 /**
- * Adds newly introduced columns to sheets created by older deployments.
- * Existing historical rows remain aligned and receive blank values in the new
- * columns; only newly scanned cards contain the added metadata.
+ * Append missing headers without moving or relabelling historical columns.
+ * Writes use header names, so reordered and custom columns remain intact.
  */
 function ensureHeaders_(sheet) {
-  var lastColumn = Math.max(sheet.getLastColumn(), 1);
-  var currentHeaders = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
-
-  if (currentHeaders.indexOf('Industry') === -1) {
-    var companyIndex = currentHeaders.indexOf('Company');
-    if (companyIndex >= 0) {
-      sheet.insertColumnAfter(companyIndex + 1);
+  var lastColumn = sheet.getLastColumn();
+  var currentHeaders = lastColumn ? sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0] : [];
+  var mappedHeaders = currentHeaders.map(canonicalHeader_);
+  HEADERS.forEach(function (header) {
+    if (mappedHeaders.indexOf(header) !== mappedHeaders.lastIndexOf(header)) {
+      throw new Error('Duplicate sheet header: ' + header + '. No card was written. Run inspectScanSheet in the Apps Script editor and verify existing data before renaming any columns.');
     }
-  }
-
-  lastColumn = Math.max(sheet.getLastColumn(), 1);
-  currentHeaders = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
-  if (currentHeaders.indexOf('Extraction Engine') === -1) {
-    var addressIndex = currentHeaders.indexOf('Address');
-    if (addressIndex >= 0) {
-      sheet.insertColumnAfter(addressIndex + 1);
+  });
+  var missing = HEADERS.filter(function (header) { return mappedHeaders.indexOf(header) === -1; });
+  if (missing.length) {
+    var requiredColumns = lastColumn + missing.length;
+    if (requiredColumns > sheet.getMaxColumns()) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredColumns - sheet.getMaxColumns());
     }
+    sheet.getRange(1, lastColumn + 1, 1, missing.length).setValues([missing]);
   }
-
-  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
   sheet.setFrozenRows(1);
+}
+
+/** Match harmless case/spacing variations without changing the user's headers. */
+function canonicalHeader_(value) {
+  var normalized = String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  for (var i = 0; i < HEADERS.length; i++) {
+    if (HEADERS[i].toLowerCase() === normalized) return HEADERS[i];
+  }
+  return '';
+}
+
+/** Run manually in the editor: reports ONLY headers, never changes sheet data. */
+function inspectScanSheet() {
+  var spreadsheetId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (!spreadsheetId) throw new Error('No SPREADSHEET_ID is saved in this Apps Script project. Open the existing project used by the scanner.');
+  var sheet = SpreadsheetApp.openById(spreadsheetId).getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error('Scanner tab not found: ' + SHEET_NAME);
+  var lastColumn = sheet.getLastColumn();
+  var headers = lastColumn ? sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0] : [];
+  var mapped = headers.map(canonicalHeader_);
+  var report = {
+    tab: SHEET_NAME,
+    columns: headers.map(function (header, index) {
+      return { column: index + 1, header: header, scannerField: mapped[index] || '(custom/unrecognized)' };
+    }),
+    duplicates: HEADERS.filter(function (header) { return mapped.indexOf(header) !== mapped.lastIndexOf(header); }),
+    missing: HEADERS.filter(function (header) { return mapped.indexOf(header) === -1; })
+  };
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+/**
+ * Run once from the Apps Script editor to place scanner metadata beside
+ * Address: J=Department, K=Industry Source, L=Industry Sources.
+ *
+ * The function copies complete columns (headers and historical values), then
+ * clears their old locations. It refuses to overwrite any content in J:L.
+ */
+function placeMetadataColumnsAtJToL() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('Sheet is busy. Wait for active scans to finish and try again.');
+  }
+
+  try {
+    var spreadsheetId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+    if (!spreadsheetId) throw new Error('No SPREADSHEET_ID is saved in this Apps Script project.');
+    var sheet = SpreadsheetApp.openById(spreadsheetId).getSheetByName(SHEET_NAME);
+    if (!sheet) throw new Error('Scanner tab not found: ' + SHEET_NAME);
+
+    var lastRow = Math.max(sheet.getLastRow(), 1);
+    if (sheet.getMaxColumns() < 12) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), 12 - sheet.getMaxColumns());
+    }
+
+    var lastColumn = sheet.getLastColumn();
+    var headers = lastColumn ? sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0] : [];
+    var mapped = headers.map(canonicalHeader_);
+    var plans = METADATA_COLUMN_LAYOUT.map(function (item) {
+      var matches = [];
+      mapped.forEach(function (header, index) {
+        if (header === item.header) matches.push(index + 1);
+      });
+      if (matches.length > 1) {
+        throw new Error('Duplicate sheet header: ' + item.header + '. No columns were moved.');
+      }
+
+      var sourceColumn = matches.length ? matches[0] : 0;
+      if (sourceColumn !== item.column) {
+        var targetValues = sheet.getRange(1, item.column, lastRow, 1).getDisplayValues();
+        var occupied = targetValues.some(function (row) { return String(row[0] || '').trim() !== ''; });
+        if (occupied) {
+          throw new Error('Column ' + item.column + ' must be empty before placing ' + item.header + '. No columns were moved.');
+        }
+      }
+
+      var values = sourceColumn
+        ? sheet.getRange(1, sourceColumn, lastRow, 1).getValues()
+        : Array.from({ length: lastRow }, function (_, index) { return [index === 0 ? item.header : '']; });
+      return { header: item.header, sourceColumn: sourceColumn, targetColumn: item.column, values: values };
+    });
+
+    plans.forEach(function (plan) {
+      if (plan.sourceColumn !== plan.targetColumn) {
+        sheet.getRange(1, plan.targetColumn, lastRow, 1).setValues(plan.values);
+      }
+    });
+    SpreadsheetApp.flush();
+
+    plans.forEach(function (plan) {
+      if (plan.sourceColumn && plan.sourceColumn !== plan.targetColumn) {
+        sheet.getRange(1, plan.sourceColumn, lastRow, 1).clearContent();
+      }
+    });
+    SpreadsheetApp.flush();
+    ensureHeaders_(sheet);
+    SpreadsheetApp.flush();
+
+    var result = { status: 'ok', message: 'Metadata columns placed at J:L.', revision: SCRIPT_REVISION };
+    Logger.log(JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** Store untrusted OCR/model output as bounded text, never as a formula. */

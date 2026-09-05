@@ -15,7 +15,7 @@ Field Identification & Correction Rules:
 - "Website": Clean domain names (e.g., "www . example . com" -> "www.example.com").
 - "Phone": Capture EVERY phone number printed in the text (mobile, office, direct line, fax). Preserve country codes (+91, +1), area codes, and original formatting. Separate multiple numbers with " / ".
 - "Company": Detect company/organization name. Look for entity suffixes ("Pvt Ltd", "Limited", "Inc", "LLC", "Corp", "Group", "Technologies", "Solutions", "Services", "Industries", etc.) or brand titles.
-- "Industry": Return one concise, high-level business sector inferred from the company name, website/email domain, and any products or services in the OCR text. If there is not enough evidence, return "Unclassified".
+- "Industry": Return one concise, high-level business sector inferred from the company name, website/email domain, and any products or services in the OCR text. A person's job title is not the company's sector. Generic names containing Technologies, Solutions, or Ventures are insufficient on their own. If there is not enough business evidence, return "Unclassified"; unresolved industries are researched separately after extraction.
 - "Designation": Identify job titles across all levels (CEO, MD, Director, Manager, Lead, Engineer, Consultant, Executive, Architect, Founder, Partner, Level 1-3).
 - "Address": Combine multi-line street address, building/floor/plot details, colony/nagar/sector/city/state/country, and 5-6 digit PIN/ZIP codes into a single line separated by commas.
 - For contact fields not present in the text, return an empty string "". Do not invent contact data. Industry may only be inferred using the evidence described above.

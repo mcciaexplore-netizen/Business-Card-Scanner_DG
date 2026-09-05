@@ -31,7 +31,10 @@ Rules:
 - "Industry": return one concise, high-level business sector based on the
   company name, website/email domain, and any products or services printed on
   the card (for example "Banking & Financial Services" or "Automotive &
-  Mobility"). If the evidence is insufficient, return "Unclassified".
+  Mobility"). A person's job title is not the company's sector. Generic names
+  containing "Technologies", "Solutions", or "Ventures" are insufficient on
+  their own. If the business evidence is insufficient, return "Unclassified";
+  unresolved industries are researched separately after card extraction.
 - "Address": combine a multi-line postal address into a single line,
   separated by commas.
 - For contact fields not present on the card, return an empty string "" -
