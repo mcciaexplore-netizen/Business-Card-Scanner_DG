@@ -1,19 +1,8 @@
 import { Jimp, JimpMime } from "jimp";
 import { getGeminiClient, GEMINI_MODEL, detectMimeType } from "./geminiClient";
 
-/**
- * This replaces the previous OpenCV-based card_detector.py entirely.
- * Instead of contour detection, Gemini itself is asked to find the
- * bounding box of every card in the photo (a documented Gemini vision
- * capability), and jimp - a pure-JavaScript image library with zero
- * native dependencies - crops each region out of the original
- * full-resolution image so extraction still runs on a sharp, individual
- * crop per card, same as the original architecture.
- *
- * jimp was chosen over `sharp` specifically because sharp ships native
- * platform binaries that are a common source of "works locally, breaks
- * on Vercel" deployment failures; jimp has none of that risk.
- */
+// OpenCV detects boxes when the OCR sidecar is available. Gemini detects them
+// otherwise, and pure-JavaScript Jimp crops each full-resolution card.
 
 const DETECTION_PROMPT = `Look at this image, which contains multiple business
 cards laid out (possibly 20-30 or more), photographed together. Identify
@@ -56,6 +45,34 @@ export interface DetectedBox {
   xmax: number;
 }
 
+function boxArea(box: DetectedBox): number {
+  return Math.max(0, box.ymax - box.ymin) * Math.max(0, box.xmax - box.xmin);
+}
+
+function overlapRatios(left: DetectedBox, right: DetectedBox) {
+  const width = Math.max(0, Math.min(left.xmax, right.xmax) - Math.max(left.xmin, right.xmin));
+  const height = Math.max(0, Math.min(left.ymax, right.ymax) - Math.max(left.ymin, right.ymin));
+  const intersection = width * height;
+  const leftArea = boxArea(left);
+  const rightArea = boxArea(right);
+  const union = leftArea + rightArea - intersection;
+  return {
+    iou: union > 0 ? intersection / union : 0,
+    containment: Math.min(leftArea, rightArea) > 0 ? intersection / Math.min(leftArea, rightArea) : 0,
+  };
+}
+
+/** Removes repeated or nested detections before they create duplicate OCR charges. */
+export function deduplicateDetectedBoxes(boxes: DetectedBox[]): DetectedBox[] {
+  const largestFirst = [...boxes].sort((left, right) => boxArea(right) - boxArea(left));
+  return largestFirst.filter((box, index) =>
+    !largestFirst.slice(0, index).some((kept) => {
+      const overlap = overlapRatios(box, kept);
+      return overlap.iou >= 0.6 || overlap.containment >= 0.88;
+    })
+  );
+}
+
 import { detectOpenCvBoxes } from "./enhancement/rapidOcrClient";
 
 export async function detectCardBoxes(imageBytes: Buffer): Promise<DetectedBox[]> {
@@ -63,7 +80,7 @@ export async function detectCardBoxes(imageBytes: Buffer): Promise<DetectedBox[]
     const openCvBoxes = await detectOpenCvBoxes(imageBytes);
     if (openCvBoxes && openCvBoxes.length > 0) {
       console.log(`[detectCardBoxes] OpenCV detected ${openCvBoxes.length} card(s) locally (Cost: ₹0.00)`);
-      return openCvBoxes;
+      return deduplicateDetectedBoxes(openCvBoxes);
     }
   } catch (e) {
     console.log(`[detectCardBoxes] OpenCV box detection failed (${e}), falling back to Gemini Vision`);
@@ -103,7 +120,7 @@ export async function detectCardBoxes(imageBytes: Buffer): Promise<DetectedBox[]
     if (ymax <= ymin || xmax <= xmin) continue;
     boxes.push({ ymin, xmin, ymax, xmax });
   }
-  return boxes;
+  return deduplicateDetectedBoxes(boxes);
 }
 
 /** Crops one detected card out of the full-resolution original image,

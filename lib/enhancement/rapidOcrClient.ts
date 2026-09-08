@@ -4,6 +4,14 @@ import { OcrResult } from "../ocr";
 // RapidOCR is opt-in. An unset URL means the deployment intentionally uses
 // Gemini fallbacks without making a pointless localhost request on Vercel.
 const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL?.trim().replace(/\/+$/, "");
+const OCR_REQUEST_TIMEOUT_MS = Math.max(
+  5000,
+  Math.min(30000, Number(process.env.OCR_SERVICE_TIMEOUT_MS) || 8000)
+);
+
+export function isOcrServiceConfigured(): boolean {
+  return Boolean(OCR_SERVICE_URL);
+}
 
 function requireOcrServiceUrl(): string {
   if (!OCR_SERVICE_URL) {
@@ -36,7 +44,7 @@ export async function runRapidOcr(imageBytes: Buffer): Promise<OcrResult> {
   const res = await fetch(`${serviceUrl}/ocr-extract`, {
     method: "POST",
     body: formData,
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(OCR_REQUEST_TIMEOUT_MS),
   });
 
   if (!res.ok) {

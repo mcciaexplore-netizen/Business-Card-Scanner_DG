@@ -12,23 +12,22 @@ the script); only the application code changed language.
 - **Card detection uses OpenCV when the optional local OCR sidecar is
   available, then falls back to Gemini.** Each detected box is cropped from
   the full-resolution image with `jimp`, which has no native dependency.
-- **Card text extraction now has two confidence-gated OCR attempts before
-  Gemini Vision.** Tesseract runs first in supported local environments. If
-  it is below 70% confidence or cannot produce a complete card, the existing
-  RapidOCR/ONNX sidecar gets the second attempt at the same 70% threshold.
-  Gemini text parsing and then Gemini Vision remain the cloud fallbacks.
+- **Card text extraction starts with browser PaddleOCR.js.** Its PP-OCRv5
+  result enters the same 70% confidence gate. Tesseract and the optional
+  RapidOCR/ONNX sidecar remain server-side fallbacks, followed by Gemini text
+  parsing and finally Gemini Vision.
 - **Industry uses company and card-description evidence first.** Unresolved
   sectors receive a bounded Google Search-grounded Gemini lookup. Ambiguous
   companies stay `Unclassified`; search failures do not prevent saving cards.
-- **Department ownership is supported in every scan mode.** The dropdown is
-  ready for the organization's department list; see configuration below.
+- **Every scan can optionally record who scanned the card.** People can search
+  and select a configured name, choose `Other`, or scan without a name.
 - **Phone and other extracted values are stored as text safely.** Values that
   could be interpreted as spreadsheet formulas are escaped before storage.
   Printed country codes, leading zeros, parentheses, spaces, and dashes are
   preserved; equivalent duplicates are removed and multiple numbers use ` / `.
 - **Every newly scanned row records its extraction engine.** The sheet shows
-  `Tesseract OCR`, `RapidOCR`, `Gemini Text fallback (...)`, or `Gemini Vision
-  fallback`. Two-sided scans record both engines when they differ.
+  `PaddleOCR.js`, `Tesseract OCR`, `RapidOCR`, `Gemini Text fallback (...)`, or
+  `Gemini Vision fallback`. Two-sided scans record both engines when they differ.
 - **Storage remains an Apps Script webhook.** `apps-script/Code.gs` now
   adds missing columns without moving existing ones and forces submitted
   values to safe text. `lib/storage.ts` applies the same safety rule before
@@ -42,10 +41,11 @@ the script); only the application code changed language.
 
 ```
 Browser (React)
+   ├─► PaddleOCR.js PP-OCRv5 (>=70%, best effort)
    │
    ├─ POST /api/scan/single or /double
    │        ├─► Shared Apps Script rate check
-   │        └─► Tesseract (>=70%)
+   │        └─► Tesseract locally, then PaddleOCR text (>=70%)
    │              └─► RapidOCR sidecar (>=70%)
    │                    └─► Gemini text
    │                          └─► Gemini Vision
@@ -56,7 +56,8 @@ Browser (React)
             ├─► Shared Apps Script rate + bulk-permit check
             └─► OpenCV sidecar or Gemini card detection
                   └─► jimp crop per card
-                        └─► same extraction pipeline above
+                        └─► map browser OCR text into each crop
+                              └─► same extraction pipeline above
 ```
 
 The shared rate check fails open if Apps Script is temporarily unavailable;
@@ -143,15 +144,16 @@ Incoming fields are plain text so phone numbers containing `+`, `-`, `/` or
 parentheses cannot become formulas. Redeploy the app and Apps Script together:
 an older script will not store the new metadata.
 
-### Department ownership and industry research
+### Scanner identity and industry research
 
-- A basic starter list is configured in `DEPARTMENTS` in `lib/departments.ts`.
-  Replace those names with the organization's official departments when they
-  are available, then rebuild/redeploy the app. Users can choose a department or
-  leave the card as `Not assigned`; the backend accepts only configured names.
-- Single and double-sided cards use one selection. A bulk upload assigns the
-  selected department to **every card in that upload**. This is self-reported
-  ownership, not authentication or proof of who scanned the card.
+- The organization's known people are configured in `PEOPLE` in
+  `lib/people.ts`. Users can search the list, select a name, or choose `Other`
+  and enter a new name. New names are remembered by that browser for future
+  scans. Scanner identity is optional; supplied names are trimmed, limited to
+  100 characters, and saved as `Scanned By` with the card.
+- Single and double-sided cards use one scanner name. A bulk upload assigns the
+  selected/entered name to **every card in that upload**. This is self-reported
+  identity, not authentication or proof of who scanned the card.
 - The existing `Industry` column is the company's business sector, not its web
   address. Product/service text and company evidence are used first; a person's
   job title and generic company suffixes are not sufficient business evidence.
@@ -159,12 +161,12 @@ an older script will not store the new metadata.
   [Google Search grounding](https://ai.google.dev/gemini-api/docs/google-search)
   through the existing Gemini key/model. Only company name and printed website
   are sent to this additional lookup, not contact names, phone numbers, full
-  email addresses, or departments. There is no separate search API key.
+  email addresses, or scanner names. There is no separate search API key.
 - A web sector is accepted only when the response declares an unambiguous
   company match and includes a provider-grounded citation supporting the sector.
   A same-name company without enough identity evidence remains `Unclassified`.
   AI classification is still fallible; source links are supplied for review.
-- New rows include `Department`, `Industry Source`, and `Industry Sources`.
+- New rows include `Scanned By`, `Industry Source`, and `Industry Sources`.
   The existing `Extraction Engine` still describes the OCR/Gemini extraction,
   independently of industry research. Source links and Google search suggestions
   appear in scan results; suggestion HTML is isolated in a sandboxed frame and
@@ -185,7 +187,7 @@ does not upload a card or write to Google Sheets.
 
 ### Troubleshooting an HTML response during save
 
-The Apps Script health response identifies revision `metadata-columns-jkl-4`. This
+The Apps Script health response identifies revision `empty-row-and-duplicate-guard-6`. This
 version commits pending spreadsheet writes with `SpreadsheetApp.flush()` before
 releasing the write lock or claiming success, and returns the failure stage when
 an exception can be caught. The application removes inline HTML scripts/styles
@@ -195,11 +197,14 @@ Formatting now targets one scanner column at a time: Google Sheets tables can
 reject a number-format operation spanning several columns. Custom/blank columns
 are not formatted, and formatting is flushed before card values are submitted.
 
-After updating the Apps Script code, run `placeMetadataColumnsAtJToL` once from
+After updating the Apps Script code, run `placePeopleColumnsAtJToL` once from
 the Apps Script editor. It moves the complete existing metadata columns, including
-historical values, to `J:Department`, `K:Industry Source`, and
+historical values, to `J:Scanned By`, `K:Industry Source`, and
 `L:Industry Sources`, then clears their old locations. It stops without moving
 anything if J:L contain existing data, so those values cannot be overwritten.
+An existing `Department` column is preserved. If it already occupies J, the
+migration moves it to a `Legacy Department` column before creating `Scanned By`;
+historical department values are never presented as people's names.
 
 Deploy the updated code to the existing Apps Script deployment, preserving its
 secret and URL. Check **Execute as: Me** and the intended anonymous **Anyone**
@@ -230,10 +235,18 @@ npm run dev
 
 Open **http://localhost:3000**.
 
+PaddleOCR.js runs automatically in the browser and needs no environment
+variable or separate server. The first scan downloads PP-OCRv5 and WebAssembly
+assets; subsequent scans reuse the initialized engine for that page. If model
+loading, browser support, or inference exceeds 30 seconds, the request safely
+continues through the existing server OCR and Gemini fallbacks.
+
 ### 3a. Start the optional second OCR engine
 
-RapidOCR is the second OCR stage after Tesseract. Install the sidecar
-dependencies and start it in a separate terminal:
+RapidOCR is the second OCR stage after Tesseract. It runs converted PaddleOCR
+models through ONNX Runtime, so it is the lighter Paddle-style option already
+integrated with this project. Install the sidecar dependencies and start it in
+a separate terminal:
 
 ```bash
 python -m pip install -r ocr-service/requirements.txt
@@ -241,9 +254,18 @@ start-ocr-service.bat
 ```
 
 RapidOCR is opt-in. Set `OCR_SERVICE_URL=http://127.0.0.1:8000` for local use.
-Leave it unset for a temporary Vercel deployment; the app skips the sidecar
-without making a localhost request and continues directly to Gemini. A future
-production sidecar must use a hosted HTTPS URL.
+If it is blank or unreachable, the application skips this optional stage and
+continues to Gemini. Browser PaddleOCR does not require this Python service.
+
+The save routes reject extraction results that contain no name, company,
+phone, email, or website. Exact duplicate uploads are also blocked for ten
+minutes before OCR/Gemini runs. Only a SHA-256 fingerprint is retained for
+duplicate detection; the guard does not store card images.
+
+Bulk scans also remove overlapping detection boxes before OCR. Before saving,
+the extracted cards are compared using normalized names plus company/contact
+evidence; common prefixes and capitalization are ignored for this comparison.
+Duplicate crops are shown as skipped and are not written to the sheet.
 
 ### 4. Deploy to Vercel
 
@@ -262,7 +284,8 @@ uploaded or used in production, it's local-dev only:
 - `APPS_SCRIPT_URL`
 - `APPS_SCRIPT_SECRET`
 - `MAX_UPLOAD_MB` (optional, defaults to `15`)
-- `OCR_SERVICE_URL` (optional; omit until a hosted RapidOCR service exists)
+- `OCR_SERVICE_URL` (recommended; public HTTPS URL of the hosted OCR service)
+- `OCR_SERVICE_TIMEOUT_MS` (optional; defaults to `8000`)
 
 Redeploy after adding/changing env vars (Vercel doesn't hot-reload them
 into already-running deployments).

@@ -1,18 +1,20 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Dropzone } from "./Dropzone";
 import { StatsRow } from "./StatsRow";
 import { BulkResultsList } from "./BulkResultsList";
-import { DepartmentSelect } from "./DepartmentSelect";
+import { ScannedBySelect } from "./ScannedBySelect";
 import { CheckIcon, AlertIcon, GridIcon, ArrowLeftIcon } from "./icons";
 import type { BulkScanResult } from "@/lib/types";
+import { appendBrowserOcr, runBrowserPaddleOcr } from "@/lib/browserPaddleOcr";
 
 export function BulkScanPanel() {
-  const [department, setDepartment] = useState("");
+  const [scannedBy, setScannedBy] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const scanInFlight = useRef(false);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({
     text: "",
     kind: "",
@@ -47,16 +49,21 @@ export function BulkScanPanel() {
   };
 
   const handleScan = async () => {
-    if (!file) return;
+    if (!file || scanInFlight.current) return;
+    scanInFlight.current = true;
     setStatus({
       text: "Detecting and reading cards — this can take a while for large batches…",
       kind: "",
     });
     setScanning(true);
     try {
+      setStatus({ text: "Running PaddleOCR on this device before bulk extraction…", kind: "" });
+      const paddleOcr = await runBrowserPaddleOcr(file);
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("department", department);
+      fd.append("scanned_by", scannedBy);
+      appendBrowserOcr(fd, "paddle_ocr", paddleOcr);
+      setStatus({ text: "Detecting, deduplicating, and saving cards…", kind: "" });
       const res = await fetch("/api/scan/bulk", { method: "POST", body: fd });
       
       const rawText = await res.text();
@@ -82,6 +89,7 @@ export function BulkScanPanel() {
       const message = e instanceof Error ? e.message : String(e);
       setStatus({ text: message, kind: "err" });
     } finally {
+      scanInFlight.current = false;
       setScanning(false);
     }
   };
@@ -89,7 +97,7 @@ export function BulkScanPanel() {
   return (
     <section className="panel active">
       <div className="upload-card">
-        <DepartmentSelect value={department} onChange={setDepartment} disabled={scanning} bulk />
+        <ScannedBySelect value={scannedBy} onChange={setScannedBy} disabled={scanning} bulk />
         <Dropzone
           onFile={handleFile}
           previewUrl={previewUrl}

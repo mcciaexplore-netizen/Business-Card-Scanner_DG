@@ -9,12 +9,13 @@ export function BulkResultsList({ cards }: { cards: BulkCardResult[] }) {
     <div className="bulk-list">
       {cards.map((card, i) => {
         const ok = card._status === "saved";
+        const skipped = card._status.startsWith("skipped:");
         return (
           <div className="bulk-item" key={i}>
             <div className="bulk-item-head">
               <span className="bulk-item-index">Card {i + 1}</span>
-              <span className={"bulk-item-tag" + (ok ? "" : " fail")}>
-                {ok ? "saved" : "failed"}
+              <span className={"bulk-item-tag" + (ok ? "" : skipped ? " skipped" : " fail")}>
+                {ok ? "saved" : skipped ? "duplicate skipped" : "failed"}
               </span>
             </div>
             <div className="bulk-item-fields">

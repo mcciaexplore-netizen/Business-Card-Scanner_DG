@@ -2,7 +2,7 @@ export const OCR_CONFIDENCE_THRESHOLD = 70;
 export const MIN_OCR_TEXT_LENGTH = 15;
 
 export interface OcrCandidate {
-  engine: "tesseract" | "rapidocr";
+  engine: "tesseract" | "rapidocr" | "paddleocr-browser";
   text: string;
   confidence: number;
 }

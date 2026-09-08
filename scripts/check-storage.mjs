@@ -19,8 +19,16 @@ async function readResponse(options) {
 }
 
 const health = await readResponse({ method: "GET" });
-if (!["save-diagnostics-2", "save-column-format-3", "metadata-columns-jkl-4"].includes(health.revision)) {
-  throw new Error("Deploy metadata-columns-jkl-4 before running this check. No POST was sent.");
+const diagnosticRevisions = [
+  "save-diagnostics-2",
+  "save-column-format-3",
+  "metadata-columns-jkl-4",
+  "people-scanned-by-5",
+  "empty-row-and-duplicate-guard-6",
+  "retry-safe-duplicate-guard-7",
+];
+if (!diagnosticRevisions.includes(health.revision)) {
+  throw new Error("Deploy the current apps-script/Code.gs before running this check. No POST was sent.");
 }
 // Only this known revision supports the read-only diagnostic action. Never
 // send fields or fall back to append_card, even against an older deployment.

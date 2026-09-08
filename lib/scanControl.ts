@@ -5,6 +5,20 @@ type ScanMode = "single" | "double" | "bulk";
 
 const CLIENT_COOKIE = "aurascan_client";
 const CONTROL_TIMEOUT_MS = 3000;
+const DUPLICATE_WINDOW_SECONDS = 10 * 60;
+
+interface DuplicateClaim {
+  allowed: boolean;
+  imageHash?: string;
+  retryAfterSeconds?: number;
+}
+
+declare global {
+  var auraScanRecentImages: Map<string, number> | undefined;
+}
+
+const recentImages = globalThis.auraScanRecentImages ?? new Map<string, number>();
+globalThis.auraScanRecentImages = recentImages;
 
 interface ScanPermit {
   allowed: boolean;
@@ -32,7 +46,7 @@ function getHashedIp(req: NextRequest): string {
 }
 
 async function callControlEndpoint(
-  action: "rate_check" | "release_bulk",
+  action: "rate_check" | "release_bulk" | "duplicate_check" | "duplicate_release",
   payload: Record<string, unknown>,
   timeoutMs: number
 ): Promise<Record<string, unknown> | null> {
@@ -54,6 +68,56 @@ async function callControlEndpoint(
     console.warn(`[scanControl] ${action} unavailable; scan control failed open`, error);
     return null;
   }
+}
+
+function hashImages(mode: ScanMode, images: Buffer[]): string {
+  const hash = createHash("sha256").update(`retry-safe-v2:${mode}:`);
+  for (const image of images) {
+    hash.update(String(image.length)).update(":").update(image);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Claims uploaded images before OCR. Only a SHA-256 fingerprint is retained;
+ * the image and extracted text are never stored by this guard.
+ */
+export async function claimScanImages(mode: ScanMode, images: Buffer[]): Promise<DuplicateClaim> {
+  const imageHash = hashImages(mode, images);
+  const now = Date.now();
+  const expiresAt = recentImages.get(imageHash) || 0;
+  if (expiresAt > now) {
+    return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((expiresAt - now) / 1000)) };
+  }
+
+  for (const [key, expiry] of recentImages) {
+    if (expiry <= now) recentImages.delete(key);
+  }
+  recentImages.set(imageHash, now + DUPLICATE_WINDOW_SECONDS * 1000);
+
+  const data = await callControlEndpoint(
+    "duplicate_check",
+    { imageHash, windowSeconds: DUPLICATE_WINDOW_SECONDS },
+    CONTROL_TIMEOUT_MS
+  );
+  if (data?.status === "duplicate") {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Number(data.retryAfterSeconds) || DUPLICATE_WINDOW_SECONDS),
+    };
+  }
+  return { allowed: true, imageHash };
+}
+
+/** Releases a provisional fingerprint when extraction or storage fails. */
+export async function releaseScanImages(claim: DuplicateClaim): Promise<void> {
+  if (!claim.allowed || !claim.imageHash) return;
+  recentImages.delete(claim.imageHash);
+  await callControlEndpoint(
+    "duplicate_release",
+    { imageHash: claim.imageHash },
+    CONTROL_TIMEOUT_MS
+  );
 }
 
 /**

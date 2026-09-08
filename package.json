@@ -6,11 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
     "test": "node --experimental-strip-types --test tests/data-integrity.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.12.0",
+    "@paddleocr/paddleocr-js": "^0.4.2",
     "jimp": "^1.6.1",
     "next": "^16.2.10",
     "react": "^19.2.7",

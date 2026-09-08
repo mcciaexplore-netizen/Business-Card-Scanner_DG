@@ -1,19 +1,9 @@
 import cv2
 import numpy as np
-import io
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from rapidocr_onnxruntime import RapidOCR
+from rapidocr import RapidOCR
 
 app = FastAPI(title="AuraScan OpenCV + RapidOCR Enhancement Service")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Initialize RapidOCR ONNX model once on startup
 ocr_engine = RapidOCR()
@@ -86,7 +76,7 @@ def deskew_and_enhance(image: np.ndarray) -> np.ndarray:
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "ocr_engine": "rapidocr-onnxruntime"}
+    return {"status": "ok", "ocr_engine": "rapidocr", "inference": "onnxruntime"}
 
 @app.post("/detect-boxes")
 async def detect_card_boxes(file: UploadFile = File(...)):
@@ -138,19 +128,12 @@ async def ocr_extract(file: UploadFile = File(...)):
     processed_img = deskew_and_enhance(image)
 
     # Run RapidOCR inference
-    ocr_result, _ = ocr_engine(processed_img)
+    ocr_result = ocr_engine(processed_img)
 
-    lines = []
-    confidences = []
-
-    if ocr_result:
-        for item in ocr_result:
-            if len(item) >= 2:
-                text = item[1]
-                conf = item[2] if len(item) >= 3 else 0.9
-                if text and isinstance(text, str):
-                    lines.append(text.strip())
-                    confidences.append(float(conf))
+    recognized_text = ocr_result.txts if ocr_result.txts is not None else ()
+    recognition_scores = ocr_result.scores if ocr_result.scores is not None else ()
+    lines = [text.strip() for text in recognized_text if text and text.strip()]
+    confidences = [float(score) for score in recognition_scores]
 
     avg_confidence = (sum(confidences) / len(confidences) * 100) if confidences else 0.0
     raw_text = "\n".join(lines)

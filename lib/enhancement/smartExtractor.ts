@@ -1,10 +1,11 @@
 import { runOcr, runOcrRich } from "../ocr";
 import { parseCardText } from "../parseCardText";
-import { isOcrServiceAvailable, runRapidOcr } from "./rapidOcrClient";
+import { isOcrServiceConfigured, runRapidOcr } from "./rapidOcrClient";
 import { extractCardFieldsLocalNlp } from "./localNlpExtractor";
 import { extractFieldsFromOcrText } from "./textGemini";
 import { CardFields } from "../types";
 import { detectIndustry } from "../industry";
+import { hasMeaningfulCardData } from "../cardValidation";
 import {
   OcrCandidate,
   isOcrCandidateUsable,
@@ -136,8 +137,8 @@ function isExtractionSuccessful(f: CardFields): boolean {
 
 /**
  * Confidence-gated extraction pipeline:
- * 1. Tesseract (local development) with a 70% confidence requirement.
- * 2. RapidOCR sidecar when Tesseract is unavailable, below 70%, or incomplete.
+ * 1. Local Tesseract, then browser PaddleOCR, using a 70% confidence gate.
+ * 2. Optional RapidOCR sidecar when earlier OCR is unavailable or incomplete.
  * 3. Gemini text parsing of the best OCR text.
  * 4. Gemini Vision fallback in extractCard() when all earlier stages fail.
  */
@@ -181,8 +182,17 @@ interface SmartExtractionResult {
   engine: string;
 }
 
-export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtractionResult | null> {
-  const candidates: OcrCandidate[] = [];
+function displayOcrEngine(engine: OcrCandidate["engine"]): string {
+  if (engine === "tesseract") return "Tesseract OCR";
+  if (engine === "paddleocr-browser") return "PaddleOCR.js";
+  return "RapidOCR";
+}
+
+export async function smartExtractCard(
+  imageBytes: Buffer,
+  initialCandidates: OcrCandidate[] = []
+): Promise<SmartExtractionResult | null> {
+  const candidates: OcrCandidate[] = [...initialCandidates];
   const partialResults: Array<{ fields: CardFields; confidence: number }> = [];
 
   const rememberPartial = (fields: CardFields | null, confidence: number) => {
@@ -234,12 +244,24 @@ export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtract
     }
   }
 
-  // ── OCR stage 2: RapidOCR sidecar ────────────────────────────────────────
+  // ── OCR stage 2: browser PaddleOCR ──────────────────────────────────────
+  // The browser performs this work before uploading. It is evaluated here
+  // after Tesseract so existing local behavior retains priority.
+  for (const candidate of initialCandidates) {
+    const result = parseLocalCandidate(candidate);
+    if (result.accepted) {
+      return { fields: result.accepted, engine: displayOcrEngine(candidate.engine) };
+    }
+    rememberPartial(result.partial, candidate.confidence);
+  }
+
+  // ── OCR stage 3: RapidOCR sidecar ────────────────────────────────────────
   // This stage intentionally runs after Tesseract and before either Gemini
   // fallback. It is tried when Tesseract is unavailable, below 70%, or unable
   // to produce a complete card.
-  const serviceUp = await isOcrServiceAvailable();
-  if (serviceUp) {
+  // Avoid a separate health request for every card. It doubled network work
+  // and could skip a configured service while that service was starting.
+  if (isOcrServiceConfigured()) {
     try {
       const rapidResult = await runRapidOcr(imageBytes);
       const rapidCandidate: OcrCandidate = {
@@ -262,7 +284,7 @@ export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtract
     console.log(`[smartExtractor] RapidOCR sidecar unavailable; continuing to Gemini fallback`);
   }
 
-  // ── Cloud stage 3A: Gemini text parser ───────────────────────────────────
+  // ── Cloud stage 4A: Gemini text parser ───────────────────────────────────
   const bestCandidate = selectBestOcrCandidate(candidates);
   if (!bestCandidate) {
     console.log(`[smartExtractor] No OCR engine produced enough text; continuing to Gemini Vision`);
@@ -275,7 +297,9 @@ export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtract
     );
     const cloudFields = await extractFieldsFromOcrText(bestCandidate.text);
 
-    if (cloudFields.Name || cloudFields.Phone || cloudFields.Email) {
+    // A company-only or website-only card is still useful. Accept it here so
+    // readable OCR text does not trigger the more expensive vision fallback.
+    if (hasMeaningfulCardData(cloudFields)) {
       const localFields = partialResults.sort((a, b) => b.confidence - a.confidence)[0]?.fields;
       const t3Merged: CardFields = {
         ...cloudFields,
@@ -290,7 +314,7 @@ export async function smartExtractCard(imageBytes: Buffer): Promise<SmartExtract
         "Extraction Engine": "",
       };
       console.log(`[smartExtractor] Gemini text parser extracted a usable card`);
-      const sourceEngine = bestCandidate.engine === "tesseract" ? "Tesseract OCR" : "RapidOCR";
+      const sourceEngine = displayOcrEngine(bestCandidate.engine);
       return {
         fields: t3Merged,
         engine: `Gemini Text fallback (${sourceEngine} input)`,

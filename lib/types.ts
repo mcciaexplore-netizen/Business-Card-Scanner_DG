@@ -12,7 +12,7 @@ export const EXTRACTED_FIELD_NAMES = [
 export const FIELD_NAMES = [
   ...EXTRACTED_FIELD_NAMES,
   "Extraction Engine",
-  "Department",
+  "Scanned By",
   "Industry Source",
   "Industry Sources",
 ] as const;
@@ -44,6 +44,7 @@ export interface BulkScanResult {
   detected: number;
   saved: number;
   failed: number;
+  skipped?: number;
   message: string;
   cards: BulkCardResult[];
 }

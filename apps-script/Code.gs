@@ -34,15 +34,15 @@ var SPREADSHEET_TITLE = 'Business Card Scanner - DG';
 var SHEET_NAME = 'Business Cards';
 var HEADERS = [
   'Name', 'Company', 'Industry', 'Designation', 'Phone', 'Email', 'Website',
-  'Extraction Engine', 'Address', 'Department', 'Industry Source', 'Industry Sources'
+  'Extraction Engine', 'Address', 'Scanned By', 'Industry Source', 'Industry Sources'
 ];
 var METADATA_COLUMN_LAYOUT = [
-  { header: 'Department', column: 10 },
+  { header: 'Scanned By', column: 10 },
   { header: 'Industry Source', column: 11 },
   { header: 'Industry Sources', column: 12 }
 ];
 var MAX_FIELD_LENGTH = 5000;
-var SCRIPT_REVISION = 'metadata-columns-jkl-4';
+var SCRIPT_REVISION = 'retry-safe-duplicate-guard-7';
 
 // Generous organizational abuse ceilings. These are shared across every
 // serverless instance because Apps Script owns the counters.
@@ -73,12 +73,28 @@ function doPost(e) {
     if (action === 'rate_check') {
       return jsonResponse(checkRateLimits_(body));
     }
+    if (action === 'duplicate_check') {
+      return jsonResponse(checkDuplicateScan_(body));
+    }
+    if (action === 'duplicate_release') {
+      return jsonResponse(releaseDuplicateScan_(body));
+    }
     if (action === 'release_bulk') {
       releaseBulkLease_(body.bulkLeaseId);
       return jsonResponse({ status: 'ok' });
     }
     if (action !== 'append_card') {
       return jsonResponse({ status: 'error', message: 'Unknown action.' });
+    }
+
+    var fields = body.fields || {};
+    if (!hasMeaningfulCard_(fields)) {
+      return jsonResponse({
+        status: 'error',
+        message: 'No name, company, phone, email, or website was detected. Empty card rows are not saved.',
+        stage: 'validate_card',
+        revision: SCRIPT_REVISION
+      });
     }
 
     // Serialize migration and row allocation: concurrent scans must not share
@@ -88,7 +104,6 @@ function doPost(e) {
       return jsonResponse({ status: 'error', message: 'Sheet is busy. Please try saving again.' });
     }
     try {
-      var fields = body.fields || {};
       stage = 'open_sheet_and_check_headers';
       var sheet = getOrCreateSheet_();
       stage = 'map_columns';
@@ -228,12 +243,12 @@ function inspectScanSheet() {
 
 /**
  * Run once from the Apps Script editor to place scanner metadata beside
- * Address: J=Department, K=Industry Source, L=Industry Sources.
+ * Address: J=Scanned By, K=Industry Source, L=Industry Sources.
  *
  * The function copies complete columns (headers and historical values), then
  * clears their old locations. It refuses to overwrite any content in J:L.
  */
-function placeMetadataColumnsAtJToL() {
+function placePeopleColumnsAtJToL() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
     throw new Error('Sheet is busy. Wait for active scans to finish and try again.');
@@ -253,6 +268,22 @@ function placeMetadataColumnsAtJToL() {
     var lastColumn = sheet.getLastColumn();
     var headers = lastColumn ? sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0] : [];
     var mapped = headers.map(canonicalHeader_);
+    var legacyDepartmentColumn = 0;
+    headers.forEach(function (header, index) {
+      if (String(header || '').trim().toLowerCase() === 'department') {
+        legacyDepartmentColumn = index + 1;
+      }
+    });
+    var legacyBackup = null;
+    if (legacyDepartmentColumn === 10) {
+      var backupColumn = Math.max(lastColumn, 12) + 1;
+      if (backupColumn > sheet.getMaxColumns()) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), backupColumn - sheet.getMaxColumns());
+      }
+      var backupValues = sheet.getRange(1, legacyDepartmentColumn, lastRow, 1).getValues();
+      backupValues[0][0] = 'Legacy Department';
+      legacyBackup = { targetColumn: backupColumn, values: backupValues };
+    }
     var plans = METADATA_COLUMN_LAYOUT.map(function (item) {
       var matches = [];
       mapped.forEach(function (header, index) {
@@ -266,6 +297,7 @@ function placeMetadataColumnsAtJToL() {
       if (sourceColumn !== item.column) {
         var targetValues = sheet.getRange(1, item.column, lastRow, 1).getDisplayValues();
         var occupied = targetValues.some(function (row) { return String(row[0] || '').trim() !== ''; });
+        if (item.column === 10 && legacyBackup) occupied = false;
         if (occupied) {
           throw new Error('Column ' + item.column + ' must be empty before placing ' + item.header + '. No columns were moved.');
         }
@@ -274,11 +306,24 @@ function placeMetadataColumnsAtJToL() {
       var values = sourceColumn
         ? sheet.getRange(1, sourceColumn, lastRow, 1).getValues()
         : Array.from({ length: lastRow }, function (_, index) { return [index === 0 ? item.header : '']; });
-      return { header: item.header, sourceColumn: sourceColumn, targetColumn: item.column, values: values };
+      values[0][0] = item.header;
+      return {
+        header: item.header,
+        sourceColumn: sourceColumn,
+        targetColumn: item.column,
+        values: values,
+        needsWrite: sourceColumn !== item.column || String(headers[item.column - 1] || '').trim() !== item.header
+      };
     });
 
+    if (legacyBackup) {
+      sheet.getRange(1, legacyBackup.targetColumn, lastRow, 1).setValues(legacyBackup.values);
+      sheet.getRange(1, 10, lastRow, 1).clearContent();
+      SpreadsheetApp.flush();
+    }
+
     plans.forEach(function (plan) {
-      if (plan.sourceColumn !== plan.targetColumn) {
+      if (plan.needsWrite) {
         sheet.getRange(1, plan.targetColumn, lastRow, 1).setValues(plan.values);
       }
     });
@@ -293,7 +338,7 @@ function placeMetadataColumnsAtJToL() {
     ensureHeaders_(sheet);
     SpreadsheetApp.flush();
 
-    var result = { status: 'ok', message: 'Metadata columns placed at J:L.', revision: SCRIPT_REVISION };
+    var result = { status: 'ok', message: 'Scanned By and industry metadata placed at J:L.', revision: SCRIPT_REVISION };
     Logger.log(JSON.stringify(result, null, 2));
     return result;
   } finally {
@@ -301,11 +346,22 @@ function placeMetadataColumnsAtJToL() {
   }
 }
 
+/** Backward-compatible name retained for anyone following the earlier setup notes. */
+function placeMetadataColumnsAtJToL() {
+  return placePeopleColumnsAtJToL();
+}
+
 /** Store untrusted OCR/model output as bounded text, never as a formula. */
 function toSheetSafeText_(value) {
   var text = value == null ? '' : String(value);
   text = text.substring(0, MAX_FIELD_LENGTH);
   return /^[=+\-@]/.test(text) ? "'" + text : text;
+}
+
+function hasMeaningfulCard_(fields) {
+  return ['Name', 'Company', 'Phone', 'Email', 'Website'].some(function (field) {
+    return String(fields[field] || '').trim() !== '';
+  });
 }
 
 function checkRateLimits_(body) {
@@ -426,6 +482,47 @@ function stableKey_(value) {
     var normalized = byte < 0 ? byte + 256 : byte;
     return ('0' + normalized.toString(16)).slice(-2);
   }).join('').substring(0, 24);
+}
+
+/** Reserve an image fingerprint so repeated clicks do not buy OCR twice. */
+function checkDuplicateScan_(body) {
+  var imageHash = String(body.imageHash || '').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(imageHash)) {
+    return { status: 'error', message: 'Invalid image fingerprint.' };
+  }
+
+  var requestedWindow = Number(body.windowSeconds) || 600;
+  var windowSeconds = Math.max(60, Math.min(1800, requestedWindow));
+  var cache = CacheService.getScriptCache();
+  var key = 'SCAN_IMAGE_' + stableKey_(imageHash);
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return { status: 'ok' };
+
+  try {
+    var existing = Number(cache.get(key)) || 0;
+    var now = Date.now();
+    if (existing > now) {
+      return {
+        status: 'duplicate',
+        retryAfterSeconds: Math.max(1, Math.ceil((existing - now) / 1000))
+      };
+    }
+    cache.put(key, String(now + windowSeconds * 1000), windowSeconds);
+    return { status: 'ok' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Let a failed extraction or save retry the same image immediately. */
+function releaseDuplicateScan_(body) {
+  var imageHash = String(body.imageHash || '').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(imageHash)) {
+    return { status: 'error', message: 'Invalid image fingerprint.' };
+  }
+
+  CacheService.getScriptCache().remove('SCAN_IMAGE_' + stableKey_(imageHash));
+  return { status: 'ok' };
 }
 
 function getActiveBulkLeases_(props, now) {

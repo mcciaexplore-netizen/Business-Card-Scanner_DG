@@ -8,9 +8,10 @@ import { loadTypeScript } from "./load-typescript.mjs";
 import { readableGoogleError, assertAppsScriptSaved } from "../lib/appsScriptResponse.ts";
 
 import { detectIndustry, withDetectedIndustry, enrichIndustry, parseIndustryLookup } from "../lib/industry.ts";
-import { DEPARTMENTS, readDepartment } from "../lib/departments.ts";
+import { OTHER_PERSON_VALUE, PEOPLE, readScannedBy } from "../lib/people.ts";
 import { toSheetSafeText } from "../lib/sheetSafety.ts";
 import { normalizePhoneNumbers } from "../lib/phone.ts";
+import { assertMeaningfulCardData, hasMeaningfulCardData } from "../lib/cardValidation.ts";
 import { FIELD_NAMES, EXTRACTED_FIELD_NAMES, emptyFields } from "../lib/types.ts";
 import {
   OCR_CONFIDENCE_THRESHOLD,
@@ -43,37 +44,100 @@ test("phone numbers preserve printed formatting and explicit country codes", () 
 
 test("the card schema includes extraction provenance", () => {
   assert.ok(FIELD_NAMES.includes("Extraction Engine"));
-  assert.ok(FIELD_NAMES.includes("Department"));
+  assert.ok(FIELD_NAMES.includes("Scanned By"));
   assert.ok(FIELD_NAMES.includes("Industry Source"));
   assert.ok(FIELD_NAMES.includes("Industry Sources"));
   assert.equal(new Set(FIELD_NAMES).size, FIELD_NAMES.length);
-  assert.ok(!EXTRACTED_FIELD_NAMES.includes("Department"));
+  assert.ok(!EXTRACTED_FIELD_NAMES.includes("Scanned By"));
 });
 
-test("starter departments are selectable, optional, unique, and server-validated", () => {
-  assert.deepEqual(DEPARTMENTS, [
-    "Leadership / Management",
-    "Business Development",
-    "Sales",
-    "Marketing",
-    "Operations",
-    "Finance & Accounts",
-    "Human Resources",
-    "Information Technology",
-    "Administration",
-    "Procurement",
-    "Legal & Compliance",
-    "Customer Support",
+test("metadata-only extraction results are rejected before sheet storage", () => {
+  const emptyResult = {
+    ...emptyFields(),
+    Industry: "Unclassified",
+    "Extraction Engine": "Gemini Vision fallback",
+    "Industry Source": "Unresolved (company missing)",
+  };
+  assert.equal(hasMeaningfulCardData(emptyResult), false);
+  assert.throws(() => assertMeaningfulCardData(emptyResult), /No name, company, phone, email, or website/);
+  assert.equal(hasMeaningfulCardData({ ...emptyResult, Company: "Example Ltd" }), true);
+});
+
+test("scanner names are optional, normalized, bounded, and accept Other entries", () => {
+  assert.deepEqual(PEOPLE, [
+    "Aniruddha Brahma",
+    "Chintamani Shrotri",
+    "Ganesh Mate",
+    "Mangesh Kulkarni",
+    "Neeraj Thakur",
+    "Nikhil Jain",
+    "Prashant Jogalekar",
+    "Rajnikant Gaikwad",
+    "S H Kopardekar",
+    "Satavisha Natu",
+    "Shantanu Jagtap",
+    "Sudhanwa Kopardekar",
   ]);
-  assert.equal(new Set(DEPARTMENTS).size, DEPARTMENTS.length);
+  assert.equal(new Set(PEOPLE.map((person) => person.toLowerCase())).size, PEOPLE.length);
   const data = new FormData();
-  assert.equal(readDepartment(data), "");
-  data.set("department", "");
-  assert.equal(readDepartment(data), "");
-  data.set("department", "Invented Department");
-  assert.throws(() => readDepartment(data), /dropdown/);
-  data.set("department", DEPARTMENTS[0]);
-  assert.equal(readDepartment(data), DEPARTMENTS[0]);
+  assert.equal(readScannedBy(data), "");
+  data.set("scanned_by", "");
+  assert.equal(readScannedBy(data), "");
+  data.set("scanned_by", OTHER_PERSON_VALUE);
+  assert.equal(readScannedBy(data), "");
+  data.set("scanned_by", "  New   Person  ");
+  assert.equal(readScannedBy(data), "New Person");
+  data.set("scanned_by", "x".repeat(101));
+  assert.throws(() => readScannedBy(data), /100 characters/);
+});
+
+test("bulk duplicate matching ignores name prefixes but requires matching card evidence", () => {
+  const { areLikelySameCard, deduplicateExtractedCards } = loadTypeScript("lib/cardDeduplication.ts");
+  const first = {
+    ...emptyFields(),
+    Name: "Dr. Nikhil Jain",
+    Company: "Example Private Limited",
+    Email: "nikhil@example.com",
+    Phone: "+91 98765 43210",
+  };
+  const repeated = {
+    ...emptyFields(),
+    Name: "NIKHIL JAIN",
+    Company: "Example Pvt Ltd",
+    Email: "NIKHIL@EXAMPLE.COM",
+    Phone: "98765-43210",
+    Address: "Pune",
+  };
+  const differentPerson = {
+    ...repeated,
+    Company: "Different Company",
+    Email: "other@example.com",
+    Phone: "91234 56789",
+  };
+  assert.equal(areLikelySameCard(first, repeated), true);
+  assert.equal(areLikelySameCard(first, differentPerson), false);
+  const result = deduplicateExtractedCards([
+    { index: 0, fields: first },
+    { index: 1, fields: repeated },
+    { index: 2, fields: differentPerson },
+  ]);
+  assert.equal(result.unique.length, 2);
+  assert.equal(result.duplicates.length, 1);
+  assert.equal(result.unique[0].fields.Address, "Pune");
+});
+
+test("bulk box deduplication removes overlapping detections before OCR", () => {
+  const { deduplicateDetectedBoxes } = loadTypeScript("lib/detectCards.ts", {
+    jimp: {},
+    "./geminiClient": {},
+    "./enhancement/rapidOcrClient": {},
+  });
+  const boxes = deduplicateDetectedBoxes([
+    { ymin: 100, xmin: 100, ymax: 400, xmax: 600 },
+    { ymin: 105, xmin: 110, ymax: 395, xmax: 595 },
+    { ymin: 500, xmin: 100, ymax: 800, xmax: 600 },
+  ]);
+  assert.equal(boxes.length, 2);
 });
 
 test("two-sided merge keeps a classified back-side industry when front is unresolved", () => {
@@ -87,19 +151,21 @@ test("two-sided merge keeps a classified back-side industry when front is unreso
   assert.match(result["Extraction Engine"], /Tesseract OCR.*RapidOCR/);
 });
 
-test("all scan routes carry department ownership into saved rows and results", async () => {
-  const departmentModule = loadTypeScript("lib/departments.ts");
-  const testDepartment = departmentModule.DEPARTMENTS[0];
+test("all scan routes carry the scanner's name into saved rows and results", async () => {
+  const peopleModule = loadTypeScript("lib/people.ts");
+  const testPerson = "Test Person";
   for (const mode of ["single", "double", "bulk"]) {
     const saved = [];
     const overrides = {
       "next/server": { NextResponse: { json: (body) => body }, after: (callback) => callback() },
-      "@/lib/departments": departmentModule,
+      "@/lib/people": peopleModule,
       "@/lib/scanControl": {
         beginScanRequest: async () => ({ allowed: true }),
         withScanClientCookie: (response) => response,
         rateLimitedResponse: () => assert.fail("Not limited"),
         releaseBulkPermit: async () => {},
+        releaseScanImages: async () => {},
+        claimScanImages: async () => ({ allowed: true }),
       },
       "@/lib/extractCard": { extractCard: async () => ({ ...emptyFields(), Name: "Test", Industry: "Healthcare" }) },
       "@/lib/storage": { appendRow: async (fields) => saved.push(fields) },
@@ -108,23 +174,66 @@ test("all scan routes carry department ownership into saved rows and results", a
     };
     const { POST } = loadTypeScript(`app/api/scan/${mode}/route.ts`, overrides);
     const data = new FormData();
-    data.set("department", testDepartment);
+    data.set("scanned_by", testPerson);
     data.set(mode === "double" ? "file_front" : "file", new Blob(["test"]), "card.png");
     if (mode === "double") data.set("file_back", new Blob(["back"]), "back.png");
     const response = await POST({ formData: async () => data });
     assert.equal(saved.length, mode === "bulk" ? 2 : 1);
-    assert.ok(saved.every((fields) => fields.Department === testDepartment));
-    assert.equal((response.card || response.cards[0]).Department, testDepartment);
-    data.set("department", "Not configured");
-    const invalid = await POST({ formData: async () => data });
-    assert.match(invalid.detail, /dropdown/);
-    assert.equal(saved.length, mode === "bulk" ? 2 : 1);
+    assert.ok(saved.every((fields) => fields["Scanned By"] === testPerson));
+    assert.equal((response.card || response.cards[0])["Scanned By"], testPerson);
+    data.set("scanned_by", OTHER_PERSON_VALUE);
+    const optional = await POST({ formData: async () => data });
+    assert.equal(optional.saved, mode === "bulk" ? 2 : 1);
+    assert.equal(saved.length, mode === "bulk" ? 4 : 2);
+    assert.equal((optional.card || optional.cards[0])["Scanned By"], "");
+  }
+});
+
+test("all scan routes reject metadata-only cards before enrichment and storage", async () => {
+  for (const mode of ["single", "double", "bulk"]) {
+    let saved = 0;
+    let released = 0;
+    const overrides = {
+      "next/server": { NextResponse: { json: (body) => body }, after: (callback) => callback() },
+      "@/lib/people": loadTypeScript("lib/people.ts"),
+      "@/lib/scanControl": {
+        beginScanRequest: async () => ({ allowed: true }),
+        withScanClientCookie: (response) => response,
+        rateLimitedResponse: () => assert.fail("Not limited"),
+        releaseBulkPermit: async () => {},
+        releaseScanImages: async () => { released += 1; },
+        claimScanImages: async () => ({ allowed: true }),
+      },
+      "@/lib/extractCard": {
+        extractCard: async () => ({
+          ...emptyFields(),
+          Industry: "Unclassified",
+          "Extraction Engine": "Gemini Vision fallback",
+          "Industry Source": "Unresolved (company missing)",
+        }),
+      },
+      "@/lib/storage": { appendRow: async () => { saved += 1; } },
+      "@/lib/industry": { enrichIndustry: async () => assert.fail("Empty cards must not be enriched") },
+      "@/lib/industrySearch": { searchCompanyIndustry: async () => assert.fail("Empty cards must not be searched") },
+      "@/lib/detectCards": { detectCardBoxes: async () => [{}], cropCard: async () => Buffer.from("crop") },
+    };
+    const { POST } = loadTypeScript(`app/api/scan/${mode}/route.ts`, overrides);
+    const data = new FormData();
+    data.set("scanned_by", "Test Person");
+    data.set(mode === "double" ? "file_front" : "file", new Blob([`${mode}-empty`]), "card.png");
+    if (mode === "double") data.set("file_back", new Blob(["back-empty"]), "back.png");
+    const response = await POST({ formData: async () => data });
+    assert.equal(saved, 0);
+    assert.equal(response.saved, 0);
+    assert.equal(response.failed, 1);
+    assert.equal(released, 1);
   }
 });
 
 function scriptFixture(rows) {
   const data = rows.map((row) => [...row]);
   const formatRanges = [];
+  const cacheData = new Map();
   let maxColumns = Math.max(1, ...data.map((row) => row.length));
   let locked = false;
   const lock = { tryLock: () => { assert.equal(locked, false); locked = true; return true; }, releaseLock: () => { locked = false; } };
@@ -159,6 +268,16 @@ function scriptFixture(rows) {
   };
   const context = createContext({
     PropertiesService: { getScriptProperties: () => ({ getProperty: () => "existing-sheet" }) },
+    CacheService: { getScriptCache: () => ({
+      get: (key) => cacheData.get(key) ?? null,
+      put: (key, value) => cacheData.set(key, value),
+      remove: (key) => cacheData.delete(key),
+    }) },
+    Utilities: {
+      DigestAlgorithm: { SHA_256: "sha256" },
+      Charset: { UTF_8: "utf8" },
+      computeDigest: (_algorithm, value) => Array.from({ length: 32 }, (_, index) => (String(value).charCodeAt(index % String(value).length) || index) & 255),
+    },
     SpreadsheetApp: { openById: () => ({ getSheetByName: () => sheet }), create: () => assert.fail("Must reuse existing sheet"), flush: () => assert.equal(locked, true) },
     LockService: { getScriptLock: () => lock },
     Logger: { log() {} },
@@ -186,7 +305,7 @@ test("sheet writes follow reordered headers, preserve custom columns and release
   const oldRow = ["Old Company", "Keep this note", "Old Person", "00123"];
   const { data, context, isLocked } = scriptFixture([headers, oldRow]);
   for (let index = 0; index < 2; index++) {
-    const response = context.doPost({ postData: { contents: JSON.stringify({ secret: context.SHARED_SECRET, fields: { Company: "New Company", Name: "New Person", Phone: "+91 1234567890", Department: "Test department", Industry: "Healthcare" } }) } });
+    const response = context.doPost({ postData: { contents: JSON.stringify({ secret: context.SHARED_SECRET, fields: { Company: "New Company", Name: "New Person", Phone: "+91 1234567890", "Scanned By": "Test Person", Industry: "Healthcare" } }) } });
     assert.equal(response.status, "ok");
     assert.equal(isLocked(), false);
   }
@@ -194,8 +313,54 @@ test("sheet writes follow reordered headers, preserve custom columns and release
   assert.deepEqual(data[1], oldRow);
   assert.equal(data[2][0], "New Company");
   assert.equal(data[2][1], "");
-  assert.equal(data[2][data[0].indexOf("Department")], "Test department");
+  assert.equal(data[2][data[0].indexOf("Scanned By")], "Test Person");
   assert.equal(data[2][3], "'+91 1234567890");
+});
+
+test("Apps Script refuses metadata-only rows even if called directly", () => {
+  const rows = [["Name", "Company", "Industry", "Extraction Engine"]];
+  const { data, context } = scriptFixture(rows);
+  const response = context.doPost({ postData: { contents: JSON.stringify({
+    secret: context.SHARED_SECRET,
+    fields: { Industry: "Unclassified", "Extraction Engine": "Gemini Vision fallback" },
+  }) } });
+  assert.equal(response.status, "error");
+  assert.equal(response.stage, "validate_card");
+  assert.deepEqual(data, rows);
+});
+
+test("Apps Script duplicate claims block the same fingerprint for ten minutes", () => {
+  const { context } = scriptFixture([["Name"]]);
+  const request = { postData: { contents: JSON.stringify({
+    secret: context.SHARED_SECRET,
+    action: "duplicate_check",
+    imageHash: "a".repeat(64),
+    windowSeconds: 600,
+  }) } };
+  assert.equal(context.doPost(request).status, "ok");
+  const duplicate = context.doPost(request);
+  assert.equal(duplicate.status, "duplicate");
+  assert.ok(duplicate.retryAfterSeconds > 0);
+});
+
+test("Apps Script releases a failed scan fingerprint for immediate retry", () => {
+  const { context } = scriptFixture([["Name"]]);
+  const imageHash = "b".repeat(64);
+  const request = { postData: { contents: JSON.stringify({
+    secret: context.SHARED_SECRET,
+    action: "duplicate_check",
+    imageHash,
+    windowSeconds: 600,
+  }) } };
+  assert.equal(context.doPost(request).status, "ok");
+  assert.equal(context.doPost(request).status, "duplicate");
+  const released = context.doPost({ postData: { contents: JSON.stringify({
+    secret: context.SHARED_SECRET,
+    action: "duplicate_release",
+    imageHash,
+  }) } });
+  assert.equal(released.status, "ok");
+  assert.equal(context.doPost(request).status, "ok");
 });
 
 test("duplicate recognized headers stop a write instead of corrupting old data", () => {
@@ -224,12 +389,12 @@ test("authenticated deployed storage diagnostic never writes rows or headers", (
   context.Logger = { log() {} };
   const response = context.doPost({ postData: { contents: JSON.stringify({ secret: context.SHARED_SECRET, action: "diagnose_storage" }) } });
   assert.equal(response.status, "ok");
-  assert.equal(response.revision, "metadata-columns-jkl-4");
+  assert.equal(response.revision, "retry-safe-duplicate-guard-7");
   assert.deepEqual(data, rows);
   assert.equal(isLocked(), false);
 });
 
-test("metadata migration places department and industry evidence at J:L without losing rows", () => {
+test("metadata migration places scanner and industry evidence at J:L without losing rows", () => {
   const headers = Array(31).fill("");
   ["Name", "Company", "Industry", "Designation", "Phone", "Email", "Website", "Extraction Engine", "Address"].forEach((header, index) => { headers[index] = header; });
   headers[28] = "Department";
@@ -242,17 +407,34 @@ test("metadata migration places department and industry evidence at J:L without 
   existing[30] = "https://example.com/about";
   const { data, context, isLocked } = scriptFixture([headers, existing]);
 
-  const response = context.placeMetadataColumnsAtJToL();
+  const response = context.placePeopleColumnsAtJToL();
   assert.equal(response.status, "ok");
   assert.equal(isLocked(), false);
-  assert.deepEqual(data[0].slice(9, 12), ["Department", "Industry Source", "Industry Sources"]);
-  assert.deepEqual(data[1].slice(9, 12), ["Sales", "Card text", "https://example.com/about"]);
-  assert.deepEqual(data[0].slice(28, 31), ["", "", ""]);
-  assert.deepEqual(data[1].slice(28, 31), ["", "", ""]);
+  assert.deepEqual(data[0].slice(9, 12), ["Scanned By", "Industry Source", "Industry Sources"]);
+  assert.deepEqual(data[1].slice(9, 12), ["", "Card text", "https://example.com/about"]);
+  assert.deepEqual(data[0].slice(28, 31), ["Department", "", ""]);
+  assert.deepEqual(data[1].slice(28, 31), ["Sales", "", ""]);
   assert.deepEqual(data[1].slice(0, 9), existing.slice(0, 9));
 });
 
-test("metadata migration refuses to overwrite existing J:L content", () => {
+test("metadata migration preserves a legacy Department in a backup column when J is reused", () => {
+  const headers = [
+    "Name", "Company", "Industry", "Designation", "Phone", "Email", "Website",
+    "Extraction Engine", "Address", "Department", "Industry Source", "Industry Sources",
+  ];
+  const existing = [
+    "Person", "Company", "Healthcare", "Manager", "+91 12345 67890", "person@example.com",
+    "example.com", "Tesseract OCR", "Pune", "Sales", "Card text", "",
+  ];
+  const { data, context } = scriptFixture([headers, existing]);
+  context.placePeopleColumnsAtJToL();
+  assert.equal(data[0][9], "Scanned By");
+  assert.equal(data[1][9], "");
+  assert.equal(data[0][12], "Legacy Department");
+  assert.equal(data[1][12], "Sales");
+});
+
+test("people metadata migration refuses to overwrite existing J:L content", () => {
   const headers = Array(31).fill("");
   headers[9] = "Existing notes";
   headers[28] = "Department";
@@ -260,7 +442,7 @@ test("metadata migration refuses to overwrite existing J:L content", () => {
   headers[30] = "Industry Sources";
   const rows = [headers, Array(31).fill("")];
   const { data, context, isLocked } = scriptFixture(rows);
-  assert.throws(() => context.placeMetadataColumnsAtJToL(), /Column 10 must be empty/);
+  assert.throws(() => context.placePeopleColumnsAtJToL(), /Column 10 must be empty/);
   assert.equal(isLocked(), false);
   assert.deepEqual(data, rows);
 });
@@ -303,11 +485,11 @@ test("save confirmation rejects malformed JSON and surfaces Apps Script failure 
 });
 
 test("header matching tolerates case and whitespace without duplicating or relabelling columns", () => {
-  const { data, context } = scriptFixture([[" name ", "EMAIL", "Department", "Industry  Source"], ["Old Person", "old@example.com", "Old department", "Old source"]]);
-  const response = context.doPost({ postData: { contents: JSON.stringify({ secret: context.SHARED_SECRET, fields: { Name: "New Person", Email: "new@example.com", Department: "New department", "Industry Source": "Card text" } }) } });
+  const { data, context } = scriptFixture([[" name ", "EMAIL", "Scanned By", "Industry  Source"], ["Old Person", "old@example.com", "Old Scanner", "Old source"]]);
+  const response = context.doPost({ postData: { contents: JSON.stringify({ secret: context.SHARED_SECRET, fields: { Name: "New Person", Email: "new@example.com", "Scanned By": "New Scanner", "Industry Source": "Card text" } }) } });
   assert.equal(response.status, "ok");
-  assert.deepEqual(data[0].slice(0, 4), [" name ", "EMAIL", "Department", "Industry  Source"]);
-  assert.deepEqual(data[2].slice(0, 4), ["New Person", "new@example.com", "New department", "Card text"]);
+  assert.deepEqual(data[0].slice(0, 4), [" name ", "EMAIL", "Scanned By", "Industry  Source"]);
+  assert.deepEqual(data[2].slice(0, 4), ["New Person", "new@example.com", "New Scanner", "Card text"]);
   assert.equal(data[0].filter((header) => header.trim().toLowerCase() === "email").length, 1);
 });
 
@@ -334,7 +516,7 @@ test("industry uses card business descriptions, not the contact's job title", ()
   assert.equal(detectIndustry({ ...fields, Company: "Acme Technologies" }), "Unclassified");
 });
 
-const researchCard = () => ({ ...emptyFields(), Name: "Private Person", Company: "Acme", Industry: "Unclassified", Phone: "0123456789", Email: "private@example.com", Website: "acme.example", Department: "Chosen department", "Extraction Engine": "Tesseract OCR" });
+const researchCard = () => ({ ...emptyFields(), Name: "Private Person", Company: "Acme", Industry: "Unclassified", Phone: "0123456789", Email: "private@example.com", Website: "acme.example", "Scanned By": "Chosen Scanner", "Extraction Engine": "Tesseract OCR" });
 
 test("known card industries avoid web search", async () => {
   const result = await enrichIndustry({ ...researchCard(), Industry: "Biotechnology" }, async () => { throw new Error("Must not search"); });
@@ -349,7 +531,7 @@ test("web enrichment changes only industry metadata and passes only company iden
     return { industry: "Healthcare", sources: ["https://acme.example/about"], searchHtml: "<p>Search suggestions</p>" };
   });
   assert.equal(result.Industry, "Healthcare");
-  assert.equal(result.Department, original.Department);
+  assert.equal(result["Scanned By"], original["Scanned By"]);
   assert.equal(result.Phone, original.Phone);
   assert.equal(result["Extraction Engine"], "Tesseract OCR");
   assert.equal(result["Industry Sources"], "https://acme.example/about");
@@ -447,7 +629,7 @@ test("a model-provided industry is preserved", () => {
   assert.equal(withDetectedIndustry(fields).Industry, "Biotechnology");
 });
 
-test("both local OCR engines use the same 70 percent confidence gate", () => {
+test("all OCR engines use the same 70 percent confidence gate", () => {
   assert.equal(OCR_CONFIDENCE_THRESHOLD, 70);
   assert.equal(
     isOcrCandidateUsable({
@@ -465,6 +647,14 @@ test("both local OCR engines use the same 70 percent confidence gate", () => {
     }),
     false
   );
+  assert.equal(
+    isOcrCandidateUsable({
+      engine: "paddleocr-browser",
+      confidence: 70,
+      text: "Ria Deshpande\nFounder\nria@example.com",
+    }),
+    true
+  );
 });
 
 test("the strongest OCR text is selected for Gemini text fallback", () => {
@@ -476,6 +666,31 @@ test("the strongest OCR text is selected for Gemini text fallback", () => {
   assert.equal(selected?.engine, "rapidocr");
 });
 
+test("browser PaddleOCR payloads are validated and mapped to bulk card boxes", () => {
+  const { readBrowserOcrPayload, browserOcrCandidate, browserOcrCandidateForBox } =
+    loadTypeScript("lib/browserOcrPayload.ts");
+  const data = new FormData();
+  data.set("paddle_ocr", JSON.stringify({
+    width: 1000,
+    height: 1000,
+    items: [
+      { poly: [[100, 100], [300, 100], [300, 140], [100, 140]], text: "Ria Deshpande", score: 0.9 },
+      { poly: [[100, 160], [340, 160], [340, 200], [100, 200]], text: "ria@example.com", score: 0.8 },
+      { poly: [[600, 600], [800, 600], [800, 640], [600, 640]], text: "Other card", score: 0.95 },
+    ],
+  }));
+  const payload = readBrowserOcrPayload(data, "paddle_ocr");
+  assert.equal(browserOcrCandidate(payload).engine, "paddleocr-browser");
+  const firstCard = browserOcrCandidateForBox(payload, {
+    ymin: 50, xmin: 50, ymax: 300, xmax: 400,
+  });
+  assert.match(firstCard.text, /Ria Deshpande/);
+  assert.doesNotMatch(firstCard.text, /Other card/);
+
+  data.set("invalid", "{not-json");
+  assert.equal(readBrowserOcrPayload(data, "invalid"), null);
+});
+
 test("Apps Script contains the shared organizational abuse limits", () => {
   const source = readFileSync(resolve(projectRoot, "apps-script", "Code.gs"), "utf8");
 
@@ -484,7 +699,7 @@ test("Apps Script contains the shared organizational abuse limits", () => {
   assert.match(source, /GLOBAL_HARD_LIMIT_PER_MINUTE = 120/);
   assert.match(source, /BULK_BROWSER_LIMIT_PER_TEN_MINUTES = 5/);
   assert.match(source, /GLOBAL_CONCURRENT_BULK_LIMIT = 3/);
-  assert.match(source, /'Extraction Engine', 'Address', 'Department'/);
+  assert.match(source, /'Extraction Engine', 'Address', 'Scanned By'/);
   assert.doesNotMatch(source, /MailApp|MONITORING_|disableScanning|enableScanning/);
 });
 
@@ -495,8 +710,9 @@ test("the OCR pipeline assigns a sheet-visible engine for every success path", (
   );
   const finalSource = readFileSync(resolve(projectRoot, "lib", "extractCard.ts"), "utf8");
 
-  assert.match(smartSource, /engine: "Tesseract OCR"/);
-  assert.match(smartSource, /engine: "RapidOCR"/);
+  assert.match(smartSource, /return "Tesseract OCR"/);
+  assert.match(smartSource, /return "RapidOCR"/);
+  assert.match(smartSource, /return "PaddleOCR\.js"/);
   assert.match(smartSource, /Gemini Text fallback/);
   assert.match(finalSource, /"Gemini Vision fallback"/);
 });

@@ -3,6 +3,7 @@ import { smartExtractCard } from "./enhancement/smartExtractor";
 import { CardFields } from "./types";
 import { withDetectedIndustry } from "./industry";
 import { normalizePhoneNumbers } from "./phone";
+import type { OcrCandidate } from "./enhancement/ocrPolicy";
 
 function finalizeCard(fields: CardFields, engine: string): CardFields {
   const classified = withDetectedIndustry(fields);
@@ -18,7 +19,10 @@ function finalizeCard(fields: CardFields, engine: string): CardFields {
  * Tesseract runs first, RapidOCR is the second 70%-confidence OCR stage,
  * Gemini text parses the best OCR output, and Gemini Vision is the final fallback.
  */
-export async function extractCard(imageBytes: Buffer): Promise<CardFields> {
+export async function extractCard(
+  imageBytes: Buffer,
+  browserOcrCandidate?: OcrCandidate | null
+): Promise<CardFields> {
   const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
   // The old 3-second serverless deadline prevented the 5-second RapidOCR
   // request from ever finishing. Leave enough time for the requested second
@@ -26,7 +30,10 @@ export async function extractCard(imageBytes: Buffer): Promise<CardFields> {
   const MAX_SMART_TIMEOUT = isServerless ? 10000 : 20000;
 
   try {
-    const smartPromise = smartExtractCard(imageBytes);
+    const smartPromise = smartExtractCard(
+      imageBytes,
+      browserOcrCandidate ? [browserOcrCandidate] : []
+    );
     const timeoutPromise = new Promise<null>((resolve) =>
       setTimeout(() => resolve(null), MAX_SMART_TIMEOUT)
     );

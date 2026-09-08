@@ -1,20 +1,21 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Dropzone } from "./Dropzone";
 import { CameraCapture } from "./CameraCapture";
 import { StatsRow } from "./StatsRow";
 import { FieldList } from "./FieldList";
-import { DepartmentSelect } from "./DepartmentSelect";
+import { ScannedBySelect } from "./ScannedBySelect";
 import { CheckIcon, AlertIcon, ImageIcon, CameraIcon, ArrowLeftIcon } from "./icons";
 import type { SingleScanResult } from "@/lib/types";
+import { appendBrowserOcr, runBrowserPaddleOcr, runBrowserPaddleOcrBatch } from "@/lib/browserPaddleOcr";
 
 type Source = "upload" | "camera";
 type Step   = "front" | "back" | "done";
 
 export function SingleScanPanel() {
   const [source, setSource] = useState<Source>("upload");
-  const [department, setDepartment] = useState("");
+  const [scannedBy, setScannedBy] = useState("");
 
   // ── Per-step file & preview state ────────────────────────────────────────
   const [step,       setStep]       = useState<Step>("front");
@@ -24,6 +25,7 @@ export function SingleScanPanel() {
   const [backPreview,  setBackPreview]  = useState<string | null>(null);
 
   const [scanning, setScanning] = useState(false);
+  const scanInFlight = useRef(false);
   const [isTwoSided, setIsTwoSided] = useState(false);
   const [status,  setStatus]  = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [result,  setResult]  = useState<SingleScanResult | null>(null);
@@ -89,14 +91,19 @@ export function SingleScanPanel() {
 
   /** Single-sided: original flow, unchanged. */
   const handleScanSingle = async () => {
-    if (!frontFile) return;
+    if (!frontFile || scanInFlight.current) return;
+    scanInFlight.current = true;
     setStatus({ text: "Scanning card…", kind: "" });
     setScanning(true);
     setIsTwoSided(false);
     try {
+      setStatus({ text: "Running PaddleOCR on this device…", kind: "" });
+      const paddleOcr = await runBrowserPaddleOcr(frontFile);
       const fd = new FormData();
       fd.append("file", frontFile);
-      fd.append("department", department);
+      fd.append("scanned_by", scannedBy);
+      appendBrowserOcr(fd, "paddle_ocr", paddleOcr);
+      setStatus({ text: "Finishing card extraction…", kind: "" });
       const res = await fetch("/api/scan/single", { method: "POST", body: fd });
       const rawText = await res.text();
       let data: SingleScanResult | { detail?: string; message?: string } | null = null;
@@ -113,6 +120,7 @@ export function SingleScanPanel() {
     } catch (e) {
       setStatus({ text: e instanceof Error ? e.message : String(e), kind: "err" });
     } finally {
+      scanInFlight.current = false;
       setScanning(false);
     }
   };
@@ -129,14 +137,20 @@ export function SingleScanPanel() {
 
   /** Two-sided step 2: send both sides, merge, save. */
   const handleScanDouble = async () => {
-    if (!frontFile || !backFile) return;
+    if (!frontFile || !backFile || scanInFlight.current) return;
+    scanInFlight.current = true;
     setStatus({ text: "Scanning both sides…", kind: "" });
     setScanning(true);
     try {
+      setStatus({ text: "Running PaddleOCR on both sides…", kind: "" });
+      const [frontPaddleOcr, backPaddleOcr] = await runBrowserPaddleOcrBatch([frontFile, backFile]);
       const fd = new FormData();
       fd.append("file_front", frontFile);
       fd.append("file_back",  backFile);
-      fd.append("department", department);
+      fd.append("scanned_by", scannedBy);
+      appendBrowserOcr(fd, "paddle_ocr_front", frontPaddleOcr);
+      appendBrowserOcr(fd, "paddle_ocr_back", backPaddleOcr);
+      setStatus({ text: "Finishing card extraction…", kind: "" });
       const res = await fetch("/api/scan/double", { method: "POST", body: fd });
       const rawText = await res.text();
       let data: SingleScanResult | { detail?: string; message?: string } | null = null;
@@ -153,6 +167,7 @@ export function SingleScanPanel() {
     } catch (e) {
       setStatus({ text: e instanceof Error ? e.message : String(e), kind: "err" });
     } finally {
+      scanInFlight.current = false;
       setScanning(false);
     }
   };
@@ -165,7 +180,7 @@ export function SingleScanPanel() {
     <section className="panel active">
       <div className="upload-card">
         {step !== "done" && (
-          <DepartmentSelect value={department} onChange={setDepartment} disabled={scanning} />
+          <ScannedBySelect value={scannedBy} onChange={setScannedBy} disabled={scanning} />
         )}
 
         {/* ── Step indicator (shown during back-capture) ─────────────── */}
