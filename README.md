@@ -241,6 +241,11 @@ assets; subsequent scans reuse the initialized engine for that page. If model
 loading, browser support, or inference exceeds 30 seconds, the request safely
 continues through the existing server OCR and Gemini fallbacks.
 
+Bulk photos use browser PaddleOCR only on desktop-class devices with sufficient
+reported memory. Phones, tablets, iPad desktop mode, and low-memory devices use
+the server pipeline directly so a large decoded image plus the ONNX/Wasm model
+cannot exceed the browser tab's memory limit.
+
 ### 3a. Start the optional second OCR engine
 
 RapidOCR is the second OCR stage after Tesseract. It runs converted PaddleOCR

@@ -691,6 +691,17 @@ test("browser PaddleOCR payloads are validated and mapped to bulk card boxes", (
   assert.equal(readBrowserOcrPayload(data, "invalid"), null);
 });
 
+test("bulk browser OCR avoids mobile and low-memory tab crashes", () => {
+  const { isBulkBrowserOcrSafe } = loadTypeScript("lib/browserPaddleOcr.ts");
+
+  assert.equal(isBulkBrowserOcrSafe({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)" }), false);
+  assert.equal(isBulkBrowserOcrSafe({ userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile)" }), false);
+  assert.equal(isBulkBrowserOcrSafe({ platform: "MacIntel", maxTouchPoints: 5 }), false);
+  assert.equal(isBulkBrowserOcrSafe({ userAgent: "Desktop Chrome", deviceMemory: 4 }), false);
+  assert.equal(isBulkBrowserOcrSafe({ userAgent: "Desktop Chrome", deviceMemory: 8 }), true);
+  assert.equal(isBulkBrowserOcrSafe({ userAgent: "Macintosh Safari" }), true);
+});
+
 test("Apps Script contains the shared organizational abuse limits", () => {
   const source = readFileSync(resolve(projectRoot, "apps-script", "Code.gs"), "utf8");
 

@@ -7,7 +7,11 @@ import { BulkResultsList } from "./BulkResultsList";
 import { ScannedBySelect } from "./ScannedBySelect";
 import { CheckIcon, AlertIcon, GridIcon, ArrowLeftIcon } from "./icons";
 import type { BulkScanResult } from "@/lib/types";
-import { appendBrowserOcr, runBrowserPaddleOcr } from "@/lib/browserPaddleOcr";
+import {
+  appendBrowserOcr,
+  canRunBulkBrowserPaddleOcr,
+  runBrowserPaddleOcr,
+} from "@/lib/browserPaddleOcr";
 
 export function BulkScanPanel() {
   const [scannedBy, setScannedBy] = useState("");
@@ -57,8 +61,14 @@ export function BulkScanPanel() {
     });
     setScanning(true);
     try {
-      setStatus({ text: "Running PaddleOCR on this device before bulk extraction…", kind: "" });
-      const paddleOcr = await runBrowserPaddleOcr(file);
+      const useBrowserOcr = canRunBulkBrowserPaddleOcr();
+      setStatus({
+        text: useBrowserOcr
+          ? "Running PaddleOCR on this device before bulk extraction…"
+          : "Uploading the bulk photo for memory-safe server processing…",
+        kind: "",
+      });
+      const paddleOcr = useBrowserOcr ? await runBrowserPaddleOcr(file) : null;
       const fd = new FormData();
       fd.append("file", file);
       fd.append("scanned_by", scannedBy);

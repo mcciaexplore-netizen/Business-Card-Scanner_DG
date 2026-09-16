@@ -11,6 +11,46 @@ export interface BrowserPaddleOcrPayload {
 const BROWSER_OCR_TIMEOUT_MS = 30000;
 let enginePromise: Promise<Awaited<ReturnType<typeof createEngine>>> | null = null;
 
+export interface BrowserOcrCapabilities {
+  userAgent?: string;
+  platform?: string;
+  maxTouchPoints?: number;
+  deviceMemory?: number;
+  mobile?: boolean;
+}
+
+/**
+ * Full-photo bulk OCR has a much larger decoded-image footprint than a single
+ * card. Mobile WebKit terminates the whole tab when its memory ceiling is
+ * exceeded, so bulk OCR is limited to desktop-class devices with enough
+ * reported memory. The server pipeline remains the fallback everywhere else.
+ */
+export function isBulkBrowserOcrSafe(capabilities: BrowserOcrCapabilities): boolean {
+  const userAgent = capabilities.userAgent || "";
+  const appleTouchDevice = capabilities.platform === "MacIntel" &&
+    (capabilities.maxTouchPoints || 0) > 1;
+  const mobileDevice = Boolean(capabilities.mobile) || appleTouchDevice ||
+    /Android|iPad|iPhone|iPod|Mobile/i.test(userAgent);
+  const lowMemoryDevice = typeof capabilities.deviceMemory === "number" &&
+    capabilities.deviceMemory < 8;
+  return !mobileDevice && !lowMemoryDevice;
+}
+
+export function canRunBulkBrowserPaddleOcr(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const browserNavigator = navigator as Navigator & {
+    deviceMemory?: number;
+    userAgentData?: { mobile?: boolean };
+  };
+  return isBulkBrowserOcrSafe({
+    userAgent: browserNavigator.userAgent,
+    platform: browserNavigator.platform,
+    maxTouchPoints: browserNavigator.maxTouchPoints,
+    deviceMemory: browserNavigator.deviceMemory,
+    mobile: browserNavigator.userAgentData?.mobile,
+  });
+}
+
 async function createEngine() {
   const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
   return PaddleOCR.create({
