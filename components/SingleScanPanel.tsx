@@ -8,7 +8,13 @@ import { FieldList } from "./FieldList";
 import { ScannedBySelect } from "./ScannedBySelect";
 import { CheckIcon, AlertIcon, ImageIcon, CameraIcon, ArrowLeftIcon } from "./icons";
 import type { SingleScanResult } from "@/lib/types";
-import { appendBrowserOcr, runBrowserPaddleOcr, runBrowserPaddleOcrBatch } from "@/lib/browserPaddleOcr";
+import {
+  appendBrowserOcr,
+  canRunBrowserPaddleOcr,
+  runBrowserPaddleOcr,
+  runBrowserPaddleOcrBatch,
+  shouldUseMemorySafeImageFlow,
+} from "@/lib/browserPaddleOcr";
 
 type Source = "upload" | "camera";
 type Step   = "front" | "back" | "done";
@@ -39,7 +45,7 @@ export function SingleScanPanel() {
   }, [frontPreview, backPreview]);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
-  const makePreview = (f: File) => URL.createObjectURL(f);
+  const makePreview = (f: File) => shouldUseMemorySafeImageFlow() ? null : URL.createObjectURL(f);
 
   const handleFrontFile = useCallback((f: File) => {
     setFrontFile(f);
@@ -97,8 +103,12 @@ export function SingleScanPanel() {
     setScanning(true);
     setIsTwoSided(false);
     try {
-      setStatus({ text: "Running PaddleOCR on this device…", kind: "" });
-      const paddleOcr = await runBrowserPaddleOcr(frontFile);
+      const useBrowserOcr = canRunBrowserPaddleOcr();
+      setStatus({
+        text: useBrowserOcr ? "Running PaddleOCR on this device…" : "Uploading for server processing…",
+        kind: "",
+      });
+      const paddleOcr = useBrowserOcr ? await runBrowserPaddleOcr(frontFile) : null;
       const fd = new FormData();
       fd.append("file", frontFile);
       fd.append("scanned_by", scannedBy);
@@ -142,8 +152,14 @@ export function SingleScanPanel() {
     setStatus({ text: "Scanning both sides…", kind: "" });
     setScanning(true);
     try {
-      setStatus({ text: "Running PaddleOCR on both sides…", kind: "" });
-      const [frontPaddleOcr, backPaddleOcr] = await runBrowserPaddleOcrBatch([frontFile, backFile]);
+      const useBrowserOcr = canRunBrowserPaddleOcr();
+      setStatus({
+        text: useBrowserOcr ? "Running PaddleOCR on both sides…" : "Uploading both sides for server processing…",
+        kind: "",
+      });
+      const [frontPaddleOcr, backPaddleOcr] = useBrowserOcr
+        ? await runBrowserPaddleOcrBatch([frontFile, backFile])
+        : [null, null];
       const fd = new FormData();
       fd.append("file_front", frontFile);
       fd.append("file_back",  backFile);
@@ -174,6 +190,7 @@ export function SingleScanPanel() {
 
   // ── Current preview for the active step ───────────────────────────────────
   const activePreview = step === "back" ? backPreview : (source === "upload" ? frontPreview : null);
+  const activeFile = step === "back" ? backFile : frontFile;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -229,7 +246,14 @@ export function SingleScanPanel() {
                 onFile={step === "back" ? handleBackFile : handleFrontFile}
                 previewUrl={activePreview}
                 emptyState={
-                  <>
+                  activeFile ? (
+                    <div className="selected-file">
+                      <div className="dz-icon-wrap"><CheckIcon /></div>
+                      <h3>{step === "back" ? "Back photo selected" : "Card photo selected"}</h3>
+                      <p>{activeFile.name}</p>
+                      <p className="dz-hint">Tap here to choose a different photo</p>
+                    </div>
+                  ) : <>
                     <div className="dz-icon-wrap">
                       <ImageIconLarge />
                     </div>

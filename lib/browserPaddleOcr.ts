@@ -19,36 +19,55 @@ export interface BrowserOcrCapabilities {
   mobile?: boolean;
 }
 
-/**
- * Full-photo bulk OCR has a much larger decoded-image footprint than a single
- * card. Mobile WebKit terminates the whole tab when its memory ceiling is
- * exceeded, so bulk OCR is limited to desktop-class devices with enough
- * reported memory. The server pipeline remains the fallback everywhere else.
- */
-export function isBulkBrowserOcrSafe(capabilities: BrowserOcrCapabilities): boolean {
+export function isMemoryConstrainedBrowser(capabilities: BrowserOcrCapabilities): boolean {
   const userAgent = capabilities.userAgent || "";
-  const appleTouchDevice = capabilities.platform === "MacIntel" &&
+  const platform = capabilities.platform || "";
+  const appleTouchDevice = platform === "MacIntel" &&
     (capabilities.maxTouchPoints || 0) > 1;
   const mobileDevice = Boolean(capabilities.mobile) || appleTouchDevice ||
-    /Android|iPad|iPhone|iPod|Mobile/i.test(userAgent);
+    /Android|iPad|iPhone|iPod|Mobile/i.test(`${userAgent} ${platform}`);
   const lowMemoryDevice = typeof capabilities.deviceMemory === "number" &&
     capabilities.deviceMemory < 8;
-  return !mobileDevice && !lowMemoryDevice;
+  return mobileDevice || lowMemoryDevice;
 }
 
-export function canRunBulkBrowserPaddleOcr(): boolean {
-  if (typeof navigator === "undefined") return false;
+/**
+ * Paddle's model, WebAssembly heap and decoded images can exceed Mobile
+ * WebKit's per-tab memory ceiling. Browser OCR is therefore a desktop-only
+ * optimization; the server pipeline remains the extraction fallback.
+ */
+export function isBulkBrowserOcrSafe(capabilities: BrowserOcrCapabilities): boolean {
+  return !isMemoryConstrainedBrowser(capabilities);
+}
+
+function currentBrowserCapabilities(): BrowserOcrCapabilities | null {
+  if (typeof navigator === "undefined") return null;
   const browserNavigator = navigator as Navigator & {
     deviceMemory?: number;
     userAgentData?: { mobile?: boolean };
   };
-  return isBulkBrowserOcrSafe({
+  return {
     userAgent: browserNavigator.userAgent,
     platform: browserNavigator.platform,
     maxTouchPoints: browserNavigator.maxTouchPoints,
     deviceMemory: browserNavigator.deviceMemory,
     mobile: browserNavigator.userAgentData?.mobile,
-  });
+  };
+}
+
+export function canRunBrowserPaddleOcr(): boolean {
+  const capabilities = currentBrowserCapabilities();
+  return capabilities !== null && !isMemoryConstrainedBrowser(capabilities);
+}
+
+export function canRunBulkBrowserPaddleOcr(): boolean {
+  return canRunBrowserPaddleOcr();
+}
+
+/** Avoid asking Mobile Safari to decode and retain a full-resolution photo. */
+export function shouldUseMemorySafeImageFlow(): boolean {
+  const capabilities = currentBrowserCapabilities();
+  return capabilities === null || isMemoryConstrainedBrowser(capabilities);
 }
 
 async function createEngine() {

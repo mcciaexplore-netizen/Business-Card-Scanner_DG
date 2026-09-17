@@ -30,6 +30,12 @@ export function CameraCapture({ active, onCapture }: CameraCaptureProps) {
     return () => stopStream();
   }, [active, stopStream]);
 
+  useEffect(() => {
+    return () => {
+      if (capturedUrl) URL.revokeObjectURL(capturedUrl);
+    };
+  }, [capturedUrl]);
+
   const startCamera = async () => {
     setError("");
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -38,7 +44,11 @@ export function CameraCapture({ active, onCapture }: CameraCaptureProps) {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920, max: 2560 },
+          height: { ideal: 1080, max: 1440 },
+        },
         audio: false,
       });
       streamRef.current = stream;
@@ -77,7 +87,7 @@ export function CameraCapture({ active, onCapture }: CameraCaptureProps) {
         onCapture(file);
       },
       "image/jpeg",
-      0.92
+      0.9
     );
   };
 

@@ -4,7 +4,7 @@ import { detectCardBoxes, cropCard } from "@/lib/detectCards";
 import { appendRow } from "@/lib/storage";
 import { mapWithConcurrency } from "@/lib/concurrency";
 import { BulkCardResult, BulkScanResult, CardFields, emptyFields } from "@/lib/types";
-import { readScannedBy } from "@/lib/people";
+import { normalizeScannedBy, readScannedBy } from "@/lib/people";
 import { enrichIndustry } from "@/lib/industry";
 import { searchCompanyIndustry } from "@/lib/industrySearch";
 import { assertMeaningfulCardData } from "@/lib/cardValidation";
@@ -41,33 +41,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let keepDuplicateClaim = false;
 
   try {
-    let file: File;
+    let bytes: Buffer;
     let scannedBy = "";
     let paddlePayload: BrowserOcrPayload | null = null;
     try {
-      const formData = await req.formData();
-      scannedBy = readScannedBy(formData);
-      paddlePayload = readBrowserOcrPayload(formData, "paddle_ocr");
-      const uploaded = formData.get("file");
-      if (!(uploaded instanceof File)) {
-        return respond({ detail: "No file uploaded." }, 400);
+      if (req.headers?.get("x-aurascan-upload") === "raw") {
+        const encodedName = req.headers.get("x-aurascan-scanned-by") || "";
+        scannedBy = normalizeScannedBy(decodeURIComponent(encodedName));
+        const declaredSize = Number(req.headers.get("content-length"));
+        if (Number.isFinite(declaredSize) && declaredSize > MAX_UPLOAD_BYTES) {
+          return respond({ detail: `File exceeds ${process.env.MAX_UPLOAD_MB || 15}MB limit.` }, 413);
+        }
+        bytes = Buffer.from(await req.arrayBuffer());
+      } else {
+        const formData = await req.formData();
+        scannedBy = readScannedBy(formData);
+        paddlePayload = readBrowserOcrPayload(formData, "paddle_ocr");
+        const uploaded = formData.get("file");
+        if (!(uploaded instanceof File)) {
+          return respond({ detail: "No file uploaded." }, 400);
+        }
+        bytes = Buffer.from(await uploaded.arrayBuffer());
       }
-      file = uploaded;
     } catch (error) {
       return respond({ detail: error instanceof Error ? error.message : "Could not read the uploaded file." }, 400);
     }
 
-    if (file.size === 0) {
+    if (bytes.length === 0) {
       return respond({ detail: "Uploaded file is empty." }, 400);
     }
-    if (file.size > MAX_UPLOAD_BYTES) {
+    if (bytes.length > MAX_UPLOAD_BYTES) {
       return respond(
         { detail: `File exceeds ${process.env.MAX_UPLOAD_MB || 15}MB limit.` },
         413
       );
     }
 
-    const bytes = Buffer.from(await file.arrayBuffer());
     duplicateClaim = await claimScanImages("bulk", [bytes]);
     if (!duplicateClaim.allowed) {
       return respond(

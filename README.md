@@ -244,7 +244,10 @@ continues through the existing server OCR and Gemini fallbacks.
 Bulk photos use browser PaddleOCR only on desktop-class devices with sufficient
 reported memory. Phones, tablets, iPad desktop mode, and low-memory devices use
 the server pipeline directly so a large decoded image plus the ONNX/Wasm model
-cannot exceed the browser tab's memory limit.
+cannot exceed the browser tab's memory limit. On those devices the UI also
+avoids decoding full-resolution uploads for a preview and streams bulk files
+without multipart duplication. The original file is sent unchanged; this
+memory-safe path does not resize or compress it.
 
 ### 3a. Start the optional second OCR engine
 

@@ -369,6 +369,20 @@ h1, h2, h3 { font-family: var(--font-display); margin: 0; }
   object-fit: contain;
   object-position: center;
 }
+.selected-file {
+  width: 100%;
+  padding: 28px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.selected-file .dz-icon-wrap { margin-left: auto; margin-right: auto; }
+.selected-file p { color: var(--text-dim); }
+
+/* Large blurred compositing layers consume scarce GPU memory in Mobile
+   WebKit. The flat mobile background keeps scanning stable on iPhone/iPad. */
+@media (hover: none) and (pointer: coarse), (max-width: 720px) {
+  .ambient-glow { display: none; }
+}
 
 /* --------------------------------- camera --------------------------------- */
 

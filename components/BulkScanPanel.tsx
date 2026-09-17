@@ -11,12 +11,14 @@ import {
   appendBrowserOcr,
   canRunBulkBrowserPaddleOcr,
   runBrowserPaddleOcr,
+  shouldUseMemorySafeImageFlow,
 } from "@/lib/browserPaddleOcr";
 
 export function BulkScanPanel() {
   const [scannedBy, setScannedBy] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [memorySafeFlow, setMemorySafeFlow] = useState(false);
   const [scanning, setScanning] = useState(false);
   const scanInFlight = useRef(false);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({
@@ -32,10 +34,14 @@ export function BulkScanPanel() {
   }, [previewUrl]);
 
   const handleFile = useCallback((f: File) => {
+    const useMemorySafeFlow = shouldUseMemorySafeImageFlow();
     setFile(f);
+    setMemorySafeFlow(useMemorySafeFlow);
     setPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(f);
+      // A 48 MP iPhone photo can occupy almost 200 MB after decoding. Keeping
+      // it out of the DOM prevents WebKit from terminating the whole tab.
+      return useMemorySafeFlow ? null : URL.createObjectURL(f);
     });
     setStatus({ text: "", kind: "" });
     setResult(null);
@@ -69,12 +75,31 @@ export function BulkScanPanel() {
         kind: "",
       });
       const paddleOcr = useBrowserOcr ? await runBrowserPaddleOcr(file) : null;
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("scanned_by", scannedBy);
-      appendBrowserOcr(fd, "paddle_ocr", paddleOcr);
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
       setStatus({ text: "Detecting, deduplicating, and saving cards…", kind: "" });
-      const res = await fetch("/api/scan/bulk", { method: "POST", body: fd });
+      let res: Response;
+      if (memorySafeFlow) {
+        // Passing the File directly lets Mobile Safari stream the original
+        // bytes instead of building a second multipart copy in tab memory.
+        res = await fetch("/api/scan/bulk", {
+          method: "POST",
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+            "X-AuraScan-Upload": "raw",
+            "X-AuraScan-Scanned-By": encodeURIComponent(scannedBy),
+          },
+          body: file,
+        });
+      } else {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("scanned_by", scannedBy);
+        appendBrowserOcr(fd, "paddle_ocr", paddleOcr);
+        res = await fetch("/api/scan/bulk", { method: "POST", body: fd });
+      }
       
       const rawText = await res.text();
       let data: BulkScanResult | { detail?: string; message?: string } | null = null;
@@ -112,7 +137,14 @@ export function BulkScanPanel() {
           onFile={handleFile}
           previewUrl={previewUrl}
           emptyState={
-            <>
+            file ? (
+              <div className="selected-file">
+                <div className="dz-icon-wrap"><CheckIcon /></div>
+                <h3>Bulk photo selected</h3>
+                <p>{file.name}</p>
+                <p className="dz-hint">Tap here to choose a different photo</p>
+              </div>
+            ) : <>
               <div className="dz-icon-wrap">
                 <GridIcon />
               </div>

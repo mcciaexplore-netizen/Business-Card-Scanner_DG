@@ -691,8 +691,8 @@ test("browser PaddleOCR payloads are validated and mapped to bulk card boxes", (
   assert.equal(readBrowserOcrPayload(data, "invalid"), null);
 });
 
-test("bulk browser OCR avoids mobile and low-memory tab crashes", () => {
-  const { isBulkBrowserOcrSafe } = loadTypeScript("lib/browserPaddleOcr.ts");
+test("browser OCR and full-resolution previews avoid mobile and low-memory tab crashes", () => {
+  const { isBulkBrowserOcrSafe, isMemoryConstrainedBrowser } = loadTypeScript("lib/browserPaddleOcr.ts");
 
   assert.equal(isBulkBrowserOcrSafe({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)" }), false);
   assert.equal(isBulkBrowserOcrSafe({ userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile)" }), false);
@@ -700,6 +700,15 @@ test("bulk browser OCR avoids mobile and low-memory tab crashes", () => {
   assert.equal(isBulkBrowserOcrSafe({ userAgent: "Desktop Chrome", deviceMemory: 4 }), false);
   assert.equal(isBulkBrowserOcrSafe({ userAgent: "Desktop Chrome", deviceMemory: 8 }), true);
   assert.equal(isBulkBrowserOcrSafe({ userAgent: "Macintosh Safari" }), true);
+  assert.equal(isMemoryConstrainedBrowser({ platform: "iPhone" }), true);
+  assert.equal(isMemoryConstrainedBrowser({ userAgent: "Macintosh Safari", deviceMemory: 16 }), false);
+});
+
+test("bulk route accepts the memory-safe raw upload used by iOS", () => {
+  const source = readFileSync(resolve(projectRoot, "app", "api", "scan", "bulk", "route.ts"), "utf8");
+  assert.match(source, /x-aurascan-upload/);
+  assert.match(source, /Buffer\.from\(await req\.arrayBuffer\(\)\)/);
+  assert.match(source, /normalizeScannedBy/);
 });
 
 test("Apps Script contains the shared organizational abuse limits", () => {

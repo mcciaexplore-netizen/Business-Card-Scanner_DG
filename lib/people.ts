@@ -16,8 +16,7 @@ export const PEOPLE: readonly string[] = [
 export const OTHER_PERSON_VALUE = "__other_person__";
 const MAX_PERSON_NAME_LENGTH = 100;
 
-export function readScannedBy(formData: FormData): string {
-  const value = formData.get("scanned_by");
+export function normalizeScannedBy(value: FormDataEntryValue | string | null): string {
   if (value === null || value === "" || value === OTHER_PERSON_VALUE) return "";
   if (typeof value !== "string") return "";
 
@@ -27,4 +26,8 @@ export function readScannedBy(formData: FormData): string {
     throw new Error(`The scanner name must be ${MAX_PERSON_NAME_LENGTH} characters or fewer.`);
   }
   return name;
+}
+
+export function readScannedBy(formData: FormData): string {
+  return normalizeScannedBy(formData.get("scanned_by"));
 }
