@@ -4,9 +4,11 @@ import { CardFields } from "./types";
 import { withDetectedIndustry } from "./industry";
 import { normalizePhoneNumbers } from "./phone";
 import type { OcrCandidate } from "./enhancement/ocrPolicy";
+import { removeNonexistentContacts } from "./contactValidation";
 
-function finalizeCard(fields: CardFields, engine: string): CardFields {
-  const classified = withDetectedIndustry(fields);
+async function finalizeCard(fields: CardFields, engine: string): Promise<CardFields> {
+  const verified = await removeNonexistentContacts(fields);
+  const classified = withDetectedIndustry(verified);
   return {
     ...classified,
     Phone: normalizePhoneNumbers(classified.Phone),
@@ -40,7 +42,7 @@ export async function extractCard(
 
     const smartFields = await Promise.race([smartPromise, timeoutPromise]);
     if (smartFields) {
-      return finalizeCard(smartFields.fields, smartFields.engine);
+      return await finalizeCard(smartFields.fields, smartFields.engine);
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -48,5 +50,5 @@ export async function extractCard(
   }
 
   console.log(`[extractCard] Running Cloud Gemini Vision API extraction...`);
-  return finalizeCard(await extractCardFields(imageBytes), "Gemini Vision fallback");
+  return await finalizeCard(await extractCardFields(imageBytes), "Gemini Vision fallback");
 }

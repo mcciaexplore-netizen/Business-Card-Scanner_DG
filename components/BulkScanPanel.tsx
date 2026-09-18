@@ -149,7 +149,7 @@ export function BulkScanPanel() {
                 <GridIcon />
               </div>
               <h3>Upload bulk photo</h3>
-              <p>Drop a photo containing 20-30+ cards laid flat</p>
+              <p>Drop a photo containing up to 10 cards laid flat</p>
               <p className="dz-hint">Ensure cards are spaced apart on a contrasting plain background</p>
             </>
           }

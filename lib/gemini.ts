@@ -1,10 +1,13 @@
 import { getGeminiClient, GEMINI_MODEL, detectMimeType } from "./geminiClient";
 import { EXTRACTED_FIELD_NAMES, CardFields, emptyFields } from "./types";
+import { validateContactsAgainstEvidence } from "./contactValidation";
+
+const EVIDENCE_FIELD_NAMES = ["Email Evidence", "Website Evidence"] as const;
 
 const RESPONSE_SCHEMA = {
   type: "object",
-  properties: Object.fromEntries(EXTRACTED_FIELD_NAMES.map((n) => [n, { type: "string" }])),
-  required: [...EXTRACTED_FIELD_NAMES],
+  properties: Object.fromEntries([...EXTRACTED_FIELD_NAMES, ...EVIDENCE_FIELD_NAMES].map((n) => [n, { type: "string" }])),
+  required: [...EXTRACTED_FIELD_NAMES, ...EVIDENCE_FIELD_NAMES],
 };
 
 const EXTRACTION_PROMPT = `You are reading a single business card image. Extract
@@ -27,7 +30,12 @@ Rules:
   - Include every country code exactly as printed, whether it appears
     before the number (e.g. "+1 555-123-4567") or inside parentheses
     (e.g. "(+91) 98765 43210").
-- "Website": normalize to the domain as printed (no need to add https://).
+- "Email": return it only when a complete address containing "@" is visibly
+  printed. Copy it exactly; never repair spelling or derive it from a website.
+- "Website": return it only when a URL/domain with a visible dot is explicitly
+  printed. Copy it exactly; never derive it from the company name or email.
+- "Email Evidence": copy the exact visible line containing the email, or "".
+- "Website Evidence": copy the exact visible line containing the website, or "".
 - "Industry": return one concise, high-level business sector based on the
   company name, website/email domain, and any products or services printed on
   the card (for example "Banking & Financial Services" or "Automotive &
@@ -37,9 +45,9 @@ Rules:
   unresolved industries are researched separately after card extraction.
 - "Address": combine a multi-line postal address into a single line,
   separated by commas.
-- For contact fields not present on the card, return an empty string "" -
-  never guess or invent contact data. Industry may only be inferred using the
-  evidence described above.
+- For contact fields not present on the card, uncertain, cut off, or unreadable,
+  return an empty string "". Never complete, repair, guess, or invent contact
+  data. Industry may only be inferred using the evidence described above.
 - The card may be photographed at an angle, sideways, or upside down -
   read it correctly regardless of orientation.
 `;
@@ -62,6 +70,7 @@ export async function extractCardFields(imageBytes: Buffer): Promise<CardFields>
     config: {
       responseMimeType: "application/json",
       responseSchema: RESPONSE_SCHEMA,
+      temperature: 0,
     },
   });
 
@@ -77,5 +86,9 @@ export async function extractCardFields(imageBytes: Buffer): Promise<CardFields>
   for (const name of EXTRACTED_FIELD_NAMES) {
     result[name] = String(data[name] ?? "").trim();
   }
-  return result;
+  return validateContactsAgainstEvidence(
+    result,
+    String(data["Email Evidence"] ?? ""),
+    String(data["Website Evidence"] ?? "")
+  );
 }

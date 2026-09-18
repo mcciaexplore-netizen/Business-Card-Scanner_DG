@@ -5,7 +5,7 @@ import { getGeminiClient, GEMINI_MODEL, detectMimeType } from "./geminiClient";
 // otherwise, and pure-JavaScript Jimp crops each full-resolution card.
 
 const DETECTION_PROMPT = `Look at this image, which contains multiple business
-cards laid out (possibly 20-30 or more), photographed together. Identify
+cards laid out (usually 1-10, but possibly more), photographed together. Identify
 the bounding box of EVERY individual business card visible in the image,
 however many there are.
 
@@ -21,6 +21,8 @@ Rules:
   partially cut off at the edge of the photo.
 - Do not merge two adjacent cards into one box - each card gets its own
   box.
+- Return exactly ONE tight box for each physical card. Never return alternate,
+  nested, or slightly shifted boxes for the same card.
 - If you can't find any cards, return an empty array [].
 `;
 
@@ -62,13 +64,28 @@ function overlapRatios(left: DetectedBox, right: DetectedBox) {
   };
 }
 
+function haveSameCenter(left: DetectedBox, right: DetectedBox): boolean {
+  const leftWidth = left.xmax - left.xmin;
+  const rightWidth = right.xmax - right.xmin;
+  const leftHeight = left.ymax - left.ymin;
+  const rightHeight = right.ymax - right.ymin;
+  const leftCenterX = (left.xmin + left.xmax) / 2;
+  const rightCenterX = (right.xmin + right.xmax) / 2;
+  const leftCenterY = (left.ymin + left.ymax) / 2;
+  const rightCenterY = (right.ymin + right.ymax) / 2;
+  const areaRatio = Math.min(boxArea(left), boxArea(right)) / Math.max(boxArea(left), boxArea(right));
+  return areaRatio >= 0.45 &&
+    Math.abs(leftCenterX - rightCenterX) <= Math.min(leftWidth, rightWidth) * 0.28 &&
+    Math.abs(leftCenterY - rightCenterY) <= Math.min(leftHeight, rightHeight) * 0.28;
+}
+
 /** Removes repeated or nested detections before they create duplicate OCR charges. */
 export function deduplicateDetectedBoxes(boxes: DetectedBox[]): DetectedBox[] {
   const largestFirst = [...boxes].sort((left, right) => boxArea(right) - boxArea(left));
   return largestFirst.filter((box, index) =>
     !largestFirst.slice(0, index).some((kept) => {
       const overlap = overlapRatios(box, kept);
-      return overlap.iou >= 0.6 || overlap.containment >= 0.88;
+      return overlap.iou >= 0.42 || overlap.containment >= 0.75 || haveSameCenter(box, kept);
     })
   );
 }
@@ -98,6 +115,7 @@ export async function detectCardBoxes(imageBytes: Buffer): Promise<DetectedBox[]
     config: {
       responseMimeType: "application/json",
       responseSchema: BOX_SCHEMA,
+      temperature: 0,
     },
   });
 

@@ -12,6 +12,10 @@ import { OTHER_PERSON_VALUE, PEOPLE, readScannedBy } from "../lib/people.ts";
 import { toSheetSafeText } from "../lib/sheetSafety.ts";
 import { normalizePhoneNumbers } from "../lib/phone.ts";
 import { assertMeaningfulCardData, hasMeaningfulCardData } from "../lib/cardValidation.ts";
+import {
+  removeNonexistentContacts,
+  validateContactsAgainstEvidence,
+} from "../lib/contactValidation.ts";
 import { FIELD_NAMES, EXTRACTED_FIELD_NAMES, emptyFields } from "../lib/types.ts";
 import {
   OCR_CONFIDENCE_THRESHOLD,
@@ -126,6 +130,20 @@ test("bulk duplicate matching ignores name prefixes but requires matching card e
   assert.equal(result.unique[0].fields.Address, "Pune");
 });
 
+test("overlapping bulk detections merge complementary partial reads of one card", () => {
+  const { deduplicateExtractedCards } = loadTypeScript("lib/cardDeduplication.ts");
+  const first = { ...emptyFields(), Name: "Nikhil Jain", Phone: "+91 98765 43210" };
+  const second = { ...emptyFields(), Company: "Example Industries", Address: "Pune" };
+  const result = deduplicateExtractedCards([
+    { index: 0, fields: first, box: { ymin: 100, xmin: 100, ymax: 400, xmax: 600 } },
+    { index: 1, fields: second, box: { ymin: 120, xmin: 125, ymax: 410, xmax: 620 } },
+  ]);
+  assert.equal(result.unique.length, 1);
+  assert.equal(result.duplicates.length, 1);
+  assert.equal(result.unique[0].fields.Name, "Nikhil Jain");
+  assert.equal(result.unique[0].fields.Company, "Example Industries");
+});
+
 test("bulk box deduplication removes overlapping detections before OCR", () => {
   const { deduplicateDetectedBoxes } = loadTypeScript("lib/detectCards.ts", {
     jimp: {},
@@ -138,6 +156,33 @@ test("bulk box deduplication removes overlapping detections before OCR", () => {
     { ymin: 500, xmin: 100, ymax: 800, xmax: 600 },
   ]);
   assert.equal(boxes.length, 2);
+});
+
+test("contact fields require printed evidence and definitely nonexistent domains are removed", async () => {
+  const proposed = {
+    ...emptyFields(),
+    Email: "person@invented.invalid",
+    Website: "invented.invalid",
+  };
+  const unsupported = validateContactsAgainstEvidence(
+    proposed,
+    "Person Name - Sales Manager",
+    "Person Name - Sales Manager"
+  );
+  assert.equal(unsupported.Email, "");
+  assert.equal(unsupported.Website, "");
+
+  const supported = validateContactsAgainstEvidence(
+    proposed,
+    "Email: person @ invented . invalid",
+    "Web: www.invented.invalid"
+  );
+  assert.equal(supported.Email, proposed.Email);
+  assert.equal(supported.Website, proposed.Website);
+
+  const dnsChecked = await removeNonexistentContacts(supported, async () => false);
+  assert.equal(dnsChecked.Email, "");
+  assert.equal(dnsChecked.Website, "");
 });
 
 test("two-sided merge keeps a classified back-side industry when front is unresolved", () => {

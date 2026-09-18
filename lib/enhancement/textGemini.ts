@@ -1,5 +1,6 @@
 import { getGeminiClient, GEMINI_MODEL } from "../geminiClient";
 import { EXTRACTED_FIELD_NAMES, CardFields, emptyFields } from "../types";
+import { validateContactsAgainstEvidence } from "../contactValidation";
 
 const RESPONSE_SCHEMA = {
   type: "object",
@@ -11,14 +12,18 @@ const TEXT_EXTRACTION_PROMPT = `You are an expert business card field parser. An
 
 Field Identification & Correction Rules:
 - "Name": Identify the primary contact person's full name. Ignore generic headings like "Services", "Products", "Branch Office", "Contact Us", "ISO Certified".
-- "Email": Fix OCR typos in email addresses (e.g. spaces around "@", "gma1l" -> "gmail", "c0m" -> "com").
-- "Website": Clean domain names (e.g., "www . example . com" -> "www.example.com").
+- "Email": Return it only when the complete address is present in the OCR text.
+  You may remove spaces around "@" or dots, but never change letters or digits.
+- "Website": Return it only when the complete domain is present in the OCR
+  text. You may remove spaces around dots, but never change letters or digits.
 - "Phone": Capture EVERY phone number printed in the text (mobile, office, direct line, fax). Preserve country codes (+91, +1), area codes, and original formatting. Separate multiple numbers with " / ".
 - "Company": Detect company/organization name. Look for entity suffixes ("Pvt Ltd", "Limited", "Inc", "LLC", "Corp", "Group", "Technologies", "Solutions", "Services", "Industries", etc.) or brand titles.
 - "Industry": Return one concise, high-level business sector inferred from the company name, website/email domain, and any products or services in the OCR text. A person's job title is not the company's sector. Generic names containing Technologies, Solutions, or Ventures are insufficient on their own. If there is not enough business evidence, return "Unclassified"; unresolved industries are researched separately after extraction.
 - "Designation": Identify job titles across all levels (CEO, MD, Director, Manager, Lead, Engineer, Consultant, Executive, Architect, Founder, Partner, Level 1-3).
 - "Address": Combine multi-line street address, building/floor/plot details, colony/nagar/sector/city/state/country, and 5-6 digit PIN/ZIP codes into a single line separated by commas.
-- For contact fields not present in the text, return an empty string "". Do not invent contact data. Industry may only be inferred using the evidence described above.
+- For contact fields not present in the text, uncertain, or incomplete, return
+  an empty string "". Do not complete, repair, derive, or invent contact data.
+  Industry may only be inferred using the evidence described above.
 
 RAW OCR TEXT:
 `;
@@ -38,6 +43,7 @@ export async function extractFieldsFromOcrText(rawText: string): Promise<CardFie
     config: {
       responseMimeType: "application/json",
       responseSchema: RESPONSE_SCHEMA,
+      temperature: 0,
     },
   });
 
@@ -53,5 +59,5 @@ export async function extractFieldsFromOcrText(rawText: string): Promise<CardFie
   for (const name of EXTRACTED_FIELD_NAMES) {
     result[name] = String(data[name] ?? "").trim();
   }
-  return result;
+  return validateContactsAgainstEvidence(result, rawText, rawText);
 }

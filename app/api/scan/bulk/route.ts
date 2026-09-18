@@ -137,7 +137,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const readableCards = extractionAttempts
       .filter((attempt): attempt is ExtractionAttempt & { fields: CardFields } => attempt.fields !== null)
-      .map(({ index, fields }) => ({ index, fields }));
+      .map(({ index, fields }) => ({ index, fields, box: boxes[index] }));
     const { unique, duplicates } = deduplicateExtractedCards(readableCards);
 
     const resultByIndex = new Map<number, BulkCardResult>();

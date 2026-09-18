@@ -80,6 +80,20 @@ export function areLikelySameCard(left: CardFields, right: CardFields): boolean 
 export interface IndexedCard {
   index: number;
   fields: CardFields;
+  box?: { ymin: number; xmin: number; ymax: number; xmax: number };
+}
+
+function samePhysicalRegion(left: IndexedCard["box"], right: IndexedCard["box"]): boolean {
+  if (!left || !right) return false;
+  const width = Math.max(0, Math.min(left.xmax, right.xmax) - Math.max(left.xmin, right.xmin));
+  const height = Math.max(0, Math.min(left.ymax, right.ymax) - Math.max(left.ymin, right.ymin));
+  const intersection = width * height;
+  const leftArea = Math.max(1, (left.xmax - left.xmin) * (left.ymax - left.ymin));
+  const rightArea = Math.max(1, (right.xmax - right.xmin) * (right.ymax - right.ymin));
+  const union = leftArea + rightArea - intersection;
+  const iou = intersection / union;
+  const containment = intersection / Math.min(leftArea, rightArea);
+  return iou >= 0.3 || containment >= 0.65;
 }
 
 export function deduplicateExtractedCards(cards: IndexedCard[]): {
@@ -90,7 +104,9 @@ export function deduplicateExtractedCards(cards: IndexedCard[]): {
   const duplicates: Array<{ index: number; duplicateOf: number; fields: CardFields }> = [];
 
   for (const card of cards) {
-    const existing = unique.find((candidate) => areLikelySameCard(candidate.fields, card.fields));
+    const existing = unique.find((candidate) =>
+      samePhysicalRegion(candidate.box, card.box) || areLikelySameCard(candidate.fields, card.fields)
+    );
     if (!existing) {
       unique.push({ ...card, fields: { ...card.fields } });
       continue;

@@ -115,15 +115,11 @@ function cleanLine(line: string): string {
 }
 
 function fixEmailTypos(email: string): string {
+  // Only spacing is normalized. Changing letters/digits can turn uncertain OCR
+  // into a plausible but nonexistent address.
   return email
     .toLowerCase()
-    .replace(/\s*@\s*/, "@")
-    .replace(/gma1l\.com$/, "gmail.com")
-    .replace(/gmaill\.com$/, "gmail.com")
-    .replace(/yaho0\.com$/, "yahoo.com")
-    .replace(/hotma1l\.com$/, "hotmail.com")
-    .replace(/\.c0m$/, ".com")
-    .replace(/\.co\.1n$/, ".co.in");
+    .replace(/\s*@\s*/, "@");
 }
 
 /** Clean a designation line by finding the first keyword and extracting from there. */
